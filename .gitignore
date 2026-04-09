@@ -1,0 +1,105 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =========================
+# Jupyter Notebook
+# =========================
+.ipynb_checkpoints
+
+# =========================
+# Logs & runtime files
+# =========================
+*.log
+logs/
+*.asc
+*.blf
+
+# =========================
+# CAN / Data acquisition
+# =========================
+*.csv
+*.parquet
+*.db
+*.sqlite
+*.mf4
+
+# Raw CAN dumps
+data/
+captures/
+recordings/
+
+# DBC files
+*.dbc
+dbc/
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Testing / coverage
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Secrets / config
+# =========================
+.env
+config.yaml
+config.local.yaml
+secrets.json
+
+# =========================
+# Temporary files
+# =========================
+tmp/
+temp/
+*.tmp
+
+# =========================
+# Documentation build
+# =========================
+docs/
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.old

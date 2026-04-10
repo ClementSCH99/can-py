@@ -1,5 +1,4 @@
 """CAN message parser with DBC support"""
-
 import cantools
 from typing import Optional, Dict, Any
 
@@ -16,6 +15,7 @@ class CANParser:
         """
         self.db = None
         self.dbc_file = dbc_file
+        self.expected_signals = set()
         
         if dbc_file:
             try:
@@ -25,6 +25,15 @@ class CANParser:
             except Exception as e:
                 print(f"[ERROR] Failed to load DBC file: {e}")
                 print("  Proceeding with raw frame capture only")
+            
+            try:
+                for message in self.db.messages:
+                    for signal in message.signals:
+                        self.expected_signals.add(signal.name)
+            except Exception as e:
+                print(f"[ERROR] Failed to extract signals from DBC: {e}")
+                self.expected_signals = set()
+
     
     def parse_frame(self, msg) -> Dict[str, Any]:
         """
@@ -77,6 +86,10 @@ class CANParser:
         except Exception as e:
             # Message not found in DBC
             return None
+        
+    def get_expected_signals(self) -> set[str]:
+        """Return set of expected signal names from DBC"""
+        return self.expected_signals
     
     def get_message_info(self, can_id: int) -> Optional[Dict[str, Any]]:
         """

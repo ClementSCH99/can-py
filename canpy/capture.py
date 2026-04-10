@@ -23,9 +23,8 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
-import config
-from can_parser import CANParser
-from output_writer import OutputWriter, StreamingOutputWriter
+import canpy.config as config
+from canpy import CANParser, StreamingOutputWriter
 
 
 class CANCapture:
@@ -53,7 +52,7 @@ class CANCapture:
         self.output_dir: Optional[str] = 'data'
         self.filter_can_ids = filter_can_ids or []  # List of CAN IDs to filter by
     
-    def connect(self):
+    def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
         try:
             print(f"Scanning for CAN adapters...")
@@ -125,7 +124,6 @@ class CANCapture:
             print("- Run: python test_canable.py")
             print("- Check Device Manager for 'CandleLight USB to CAN adapter'")
             return False
-            return False
     
     def _matches_filter(self, can_id_decimal: int) -> bool:
         """
@@ -141,7 +139,7 @@ class CANCapture:
             return True
         return can_id_decimal in self.filter_can_ids
     
-    def capture(self, duration=None, count=None):
+    def capture(self, duration=None, count=None) -> bool:
         """
         Capture CAN frames
         
@@ -153,13 +151,19 @@ class CANCapture:
             print("[ERROR] Not connected to CAN bus")
             return False
         
-        self.parser = CANParser(self.dbc_file)
+        # Initialize parser with DBC if provided
+        if self.dbc_file:
+            self.parser = CANParser(self.dbc_file)
+            expected_signals = self.parser.get_expected_signals()
+        else:
+            self.parser = CANParser(None)
+            expected_signals = None
         
         # Initialize streaming writer if formats specified
         if self.log_formats:
             if self.output_dir is None:
                 self.output_dir = 'data'
-            self.writer = StreamingOutputWriter(self.output_dir)
+            self.writer = StreamingOutputWriter(self.output_dir, expected_signals)
             self.writer.start_streaming(self.log_formats)
         
         print("\n" + "=" * 80)
@@ -182,7 +186,6 @@ class CANCapture:
         else:
             print("Output: Console only (like candump)")
         
-        print()
         
         start_time = time.time()
         frame_count = 0
@@ -254,7 +257,7 @@ class CANCapture:
         
         return True
     
-    def _print_frame(self, frame_data, frame_num):
+    def _print_frame(self, frame_data, frame_num) -> None:
         """Print frame to console"""
         if not config.SHOW_CONSOLE:
             return
@@ -270,7 +273,7 @@ class CANCapture:
         else:
             print()
     
-    def disconnect(self):
+    def disconnect(self) -> None:
         """Disconnect from CAN bus"""
         if self.bus:
             try:
@@ -279,7 +282,7 @@ class CANCapture:
             except:
                 pass
     
-    def save_data(self, formats=None):
+    def save_data(self, formats=None) -> None:
         """
         Save captured data to files (batch mode, if not streaming)
         
@@ -303,21 +306,14 @@ class CANCapture:
             return
         
         output_dir = self.output_dir if self.output_dir is not None else 'data'
-        writer = OutputWriter(output_dir)
+        writer = StreamingOutputWriter(output_dir)  # Buffer size 1 for batch mode
         
         print(f"\n[INFO] Saving {len(self.frames)} frames...")
         
         try:
-            for fmt in formats:
-                try:
-                    if fmt == 'csv':
-                        writer.write_csv(self.frames)
-                    elif fmt == 'json':
-                        writer.write_json(self.frames)
-                    elif fmt == 'txt':
-                        writer.write_txt(self.frames)
-                except Exception as e:
-                    print(f"[ERROR] Failed to save {fmt.upper()}: {e}")
+            writer.start_streaming(formats)
+            for frame in self.frames:
+                writer.write_frame(frame)
         except Exception as e:
             print(f"[ERROR] Save operation failed: {e}")
 

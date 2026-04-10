@@ -31,27 +31,27 @@ pip install -r requirements.txt
 
 Capture 60 seconds of CAN data:
 ```bash
-python can_capture.py --duration 60
+python -m canpy.capture --duration 60
 ```
 
 ### With DBC Parsing
 
-If you have a DBC file (e.g., `vehicle.dbc`), capture and decode signals:
+If you have a DBC file (e.g., `dbc/6.44.4.0.dbc`), capture and decode signals:
 ```bash
-python can_capture.py --duration 60 --dbc vehicle.dbc
+python -m canpy.capture --duration 60 --dbc dbc/6.44.4.0.dbc --log csv
 ```
 
 ### Capture Specific Number of Frames
 
 ```bash
-python can_capture.py --count 1000
+python -m canpy.capture --count 500 --dbc dbc/6.44.4.0.dbc --log csv,json
 ```
 
 ### Specify Serial Port
 
 If auto-detection fails, specify the COM port:
 ```bash
-python can_capture.py --duration 60 --port COM3
+python -m canpy.capture --duration 60 --port COM3 --dbc dbc/6.44.4.0.dbc
 ```
 
 ### Filter by CAN ID
@@ -59,16 +59,16 @@ python can_capture.py --duration 60 --port COM3
 Capture only specific CAN message IDs:
 ```bash
 # Single CAN ID
-python can_capture.py --duration 60 --filter-can-id 0x123
+python -m canpy.capture --duration 60 --filter-can-id 0x123 --log csv
 
 # Multiple CAN IDs (hex format)
-python can_capture.py --duration 60 --filter-can-id 0x123,0x456,0x789
+python -m canpy.capture --duration 60 --filter-can-id 0x123,0x456,0x789 --log csv
 
 # Multiple CAN IDs (decimal format)
-python can_capture.py --duration 60 --filter-can-id 291,1110,1945
+python -m canpy.capture --duration 60 --filter-can-id 291,1110,1945 --log csv
 
 # Mix with DBC parsing
-python can_capture.py --duration 60 --dbc vehicle.dbc --filter-can-id 0x100,0x200 --log csv,json
+python -m canpy.capture --duration 60 --dbc dbc/6.44.4.0.dbc --filter-can-id 0x100,0x200 --log csv,json
 ```
 
 ## Command Line Options

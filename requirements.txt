@@ -1,3 +1,4 @@
 python-can>=4.0.0
 cantools>=4.5.0
 pyserial>=3.5
+cantact>=0.1.0

@@ -1,4 +1,28 @@
-"""Streaming writes for CAN data in various formats"""
+"""⚠️ DEPRECATED: Monolithic writer combining CSV and JSON output.
+
+WARNING: This class is deprecated as of Phase 1.1 (Complete).
+
+USE INSTEAD:
+    Create individual writers via WriterFactory:
+    
+    >>> from canpy.writers import WriterFactory
+    >>> csv_writer = WriterFactory.create('csv', output_dir='data')
+    >>> csv_writer.start_streaming()
+    >>> csv_writer.write_frame(frame)
+    
+MIGRATION PATH:
+    Old (DEPRECATED):
+        writer = StreamingOutputWriter('data', signals)
+        writer.start_streaming(['csv', 'json'])
+    
+    New (CORRECT):
+        for fmt in ['csv', 'json']:
+            writer = WriterFactory.create(fmt, output_dir='data', expected_signals=signals)
+            writer.start_streaming()
+
+This module is retained for reference only and will be removed in Phase 1.2.
+Do NOT use in new code.
+"""
 
 import csv
 import json

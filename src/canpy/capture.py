@@ -9,8 +9,11 @@ import sys
 import logging
 import os
 from typing import Optional
+from pathlib import Path
 
 # Suppress python-can debug messages BEFORE importing can
+# Decision (Phase 1.1): Keep logging suppressed by default for clean console output.
+# Future (Phase 1.2): Add --verbose flag in ConfigManager to allow debug logs on user request.
 logging.basicConfig(level=logging.CRITICAL)
 logging.getLogger('can').setLevel(logging.CRITICAL)
 
@@ -20,11 +23,11 @@ if sys.platform == 'win32':
 
 import time
 import argparse
-from pathlib import Path
 from datetime import datetime
 
 import canpy.config as config
-from canpy import CANParser, StreamingOutputWriter
+from canpy import CANParser
+from canpy import WriterFactory
 
 
 class CANCapture:
@@ -160,11 +163,16 @@ class CANCapture:
             expected_signals = None
         
         # Initialize streaming writer if formats specified
+        self.writers = {}
         if self.log_formats:
             if self.output_dir is None:
                 self.output_dir = 'data'
-            self.writer = StreamingOutputWriter(self.output_dir, expected_signals)
-            self.writer.start_streaming(self.log_formats)
+            for format in self.log_formats:
+                writer = WriterFactory.create(format,
+                                              output_dir=self.output_dir,
+                                              expected_signals=expected_signals)
+                writer.start_streaming()
+                self.writers[format] = writer
         
         print("\n" + "=" * 80)
         print("Starting CAN capture...")
@@ -218,8 +226,12 @@ class CANCapture:
                 frame_count += 1
                 
                 # Stream to files if enabled
-                if self.writer:
-                    self.writer.write_frame(frame_data)
+                if self.writers:
+                    for writer in self.writers.values():
+                        try:
+                            writer.write_frame(frame_data)
+                        except Exception as e:
+                            print(f"[ERROR] Failed to write frame to {writer}: {e}")
                 else:
                     # Keep in memory only if not streaming (short recordings)
                     self.frames.append(frame_data)
@@ -229,8 +241,11 @@ class CANCapture:
                 
                 # Print stats periodically for long captures
                 current_time = time.time()
-                if self.writer and (current_time - last_stats_time) > 10:
-                    stats = self.writer.get_stats()
+                if self.writers and (current_time - last_stats_time) > 10:
+                    # Design (Phase 1.1): All writers get the same frames at the same FPS.
+                    # Stats are identical across writers, so reporting first writer is sufficient.
+                    # Future Enhancement (Phase 2): Multi-writer aggregation if writers operate independently.
+                    stats = next(iter(self.writers.values())).get_stats()
                     fps = stats['fps']
                     elapsed = stats['elapsed_seconds']
                     print(f"[INFO] {elapsed:.1f}s | {frame_count} frames | {fps:.1f} fps")
@@ -246,9 +261,10 @@ class CANCapture:
             return False
         
         finally:
-            # Close streaming writer if active
-            if self.writer:
-                self.writer.stop_streaming()
+            # Close streaming writers if active
+            if self.writers:
+                for writer in self.writers.values():
+                    writer.stop_streaming()
             self.disconnect()
         
         print(f"\n{'=' * 80}")
@@ -281,41 +297,6 @@ class CANCapture:
                 print("[OK] Disconnected from CAN bus")
             except:
                 pass
-    
-    def save_data(self, formats=None) -> None:
-        """
-        Save captured data to files (batch mode, if not streaming)
-        
-        Args:
-            formats: List of formats ('csv', 'json', 'txt')
-        """
-        # If streaming was active, files are already saved
-        if self.writer:
-            return
-        
-        # Only save if not streaming and we have frames
-        if not self.frames:
-            print("No frames to save")
-            return
-        
-        if formats is None:
-            formats = config.OUTPUT_FORMAT
-        
-        # Skip saving if no formats specified (console-only mode)
-        if not formats or formats == []:
-            return
-        
-        output_dir = self.output_dir if self.output_dir is not None else 'data'
-        writer = StreamingOutputWriter(output_dir)  # Buffer size 1 for batch mode
-        
-        print(f"\n[INFO] Saving {len(self.frames)} frames...")
-        
-        try:
-            writer.start_streaming(formats)
-            for frame in self.frames:
-                writer.write_frame(frame)
-        except Exception as e:
-            print(f"[ERROR] Save operation failed: {e}")
 
 
 def main():
@@ -444,13 +425,6 @@ USAGE:
     
     if not capturer.capture(duration=args.duration, count=args.count):
         return 1
-    
-    # Save data (only applies to batch mode, not streaming)
-    if not log_formats and config.SHOW_CONSOLE:
-        # Console-only mode, no saving
-        pass
-    else:
-        capturer.save_data()
     
     print("[OK] Done!")
     return 0

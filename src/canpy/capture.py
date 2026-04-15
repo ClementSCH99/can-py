@@ -25,36 +25,27 @@ import time
 import argparse
 from datetime import datetime
 
-import canpy.config as config
 from canpy import CANParser
 from canpy import WriterFactory
+from canpy import ConfigManager
 
 
 class CANCapture:
     """Capture and process CAN data"""
     
-    def __init__(self, dbc_file=None, bitrate=500000, serial_port=None, log_formats=None, filter_can_ids=None):
+    def __init__(self, config_manager: ConfigManager):
         """
         Initialize CAN capture
         
         Args:
-            dbc_file: Path to DBC file (optional)
-            bitrate: CAN bus bitrate in bps
-            serial_port: Serial port for SLCAN device
-            log_formats: List of formats for streaming ('csv', 'json'), None for console-only
-            filter_can_ids: List of CAN IDs to filter by (optional)
+            config_manager: Instance of ConfigManager containing configuration settings
         """
-        self.dbc_file = dbc_file
-        self.bitrate = bitrate
-        self.serial_port = serial_port
-        self.bus = None
+        self.config_manager = config_manager
         self.parser = None
-        self.frames = []  # Only used if not streaming
-        self.log_formats = log_formats
-        self.writer = None  # StreamingOutputWriter if log_formats is set
-        self.output_dir: Optional[str] = 'data'
-        self.filter_can_ids = filter_can_ids or []  # List of CAN IDs to filter by
-    
+        self.writers = {}
+
+        self.bus = None
+
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
         try:
@@ -80,7 +71,7 @@ class CANCapture:
                     self.bus = can.interface.Bus(
                         interface='cantact',
                         channel=channel,
-                        bitrate=self.bitrate,
+                        bitrate=self.config_manager.get_setting('can', 'bitrate'),
                         timeout=1.0
                     )
                     print(f"[OK] Connected via CandleLight USB adapter")
@@ -94,7 +85,7 @@ class CANCapture:
                 self.bus = can.interface.Bus(
                     interface='cantact',
                     channel='0',
-                    bitrate=self.bitrate,
+                    bitrate=self.config_manager.get_setting('can', 'bitrate'),
                     timeout=1.0
                 )
                 print(f"[OK] Connected to CandleLight adapter (channel 0)")
@@ -103,15 +94,16 @@ class CANCapture:
                 print(f"[INFO] CandleLight direct failed: {e}")
             
             # Fallback: Try SLCAN if serial port is specified
-            if self.serial_port:
-                print(f"Trying SLCAN on port {self.serial_port}...")
+            if self.config_manager.get_setting('can', 'serial_port'):
+                serial_port = self.config_manager.get_setting('can', 'serial_port')
+                print(f"Trying SLCAN on port {serial_port}...")
                 self.bus = can.interface.Bus(
                     interface='slcan',
-                    channel=self.serial_port,
-                    bitrate=self.bitrate,
+                    channel=serial_port,
+                    bitrate=self.config_manager.get_setting('can', 'bitrate'),
                     timeout=1.0
                 )
-                print(f"[OK] Connected via SLCAN on {self.serial_port}")
+                print(f"[OK] Connected via SLCAN on {serial_port}")
                 return True
             
             print("[OK] Connected to CAN bus")
@@ -138,38 +130,35 @@ class CANCapture:
         Returns:
             True if no filter is set or if CAN ID matches filter
         """
-        if not self.filter_can_ids:
+        filter_can_ids = self.config_manager.get_setting('dbc', 'filter') or []
+        if not filter_can_ids:
             return True
-        return can_id_decimal in self.filter_can_ids
+        return can_id_decimal in filter_can_ids
     
-    def capture(self, duration=None, count=None) -> bool:
+    def capture(self) -> bool:
         """
         Capture CAN frames
-        
-        Args:
-            duration: Capture for N seconds (None for inf)
-            count: Capture N frames (None for inf)
         """
         if not self.bus:
             print("[ERROR] Not connected to CAN bus")
             return False
         
         # Initialize parser with DBC if provided
-        if self.dbc_file:
-            self.parser = CANParser(self.dbc_file)
+        dbc_file = self.config_manager.get_setting('dbc', 'file')
+        if dbc_file:
+            self.parser = CANParser(dbc_file)
             expected_signals = self.parser.get_expected_signals()
         else:
             self.parser = CANParser(None)
             expected_signals = None
         
-        # Initialize streaming writer if formats specified
-        self.writers = {}
-        if self.log_formats:
-            if self.output_dir is None:
-                self.output_dir = 'data'
-            for format in self.log_formats:
+        # Initialize writer if formats specified
+        log_formats = self.config_manager.get_setting('output', 'format')
+        output_dir = self.config_manager.get_setting('output', 'directory')
+        if log_formats:
+            for format in log_formats:
                 writer = WriterFactory.create(format,
-                                              output_dir=self.output_dir,
+                                              output_dir=output_dir,
                                               expected_signals=expected_signals)
                 writer.start_streaming()
                 self.writers[format] = writer
@@ -178,6 +167,8 @@ class CANCapture:
         print("Starting CAN capture...")
         print("=" * 80)
         
+        duration = self.config_manager.get_setting('capture', 'duration')
+        count = self.config_manager.get_setting('capture', 'count')
         if duration:
             print(f"Capturing for {duration} seconds...")
         elif count:
@@ -185,12 +176,14 @@ class CANCapture:
         else:
             print("Capturing continuously (press Ctrl+C to stop)...")
         
-        if self.filter_can_ids:
-            filter_ids_hex = [f"0x{cid:03X}" for cid in sorted(self.filter_can_ids)]
+        filter_can_ids = self.config_manager.get_setting('dbc', 'filter') or []
+        if filter_can_ids:
+            filter_ids_hex = [f"0x{cid:03X}" for cid in sorted(filter_can_ids)]
             print(f"CAN ID Filter: {', '.join(filter_ids_hex)}")
         
-        if self.log_formats:
-            print(f"Logging to: {', '.join(self.log_formats).upper()}")
+        log_formats = self.config_manager.get_setting('output', 'formats')
+        if log_formats:
+            print(f"Logging to: {', '.join(log_formats).upper()}")
         else:
             print("Output: Console only (like candump)")
         
@@ -232,9 +225,6 @@ class CANCapture:
                             writer.write_frame(frame_data)
                         except Exception as e:
                             print(f"[ERROR] Failed to write frame to {writer}: {e}")
-                else:
-                    # Keep in memory only if not streaming (short recordings)
-                    self.frames.append(frame_data)
                 
                 # Display in console
                 self._print_frame(frame_data, frame_count)
@@ -242,9 +232,6 @@ class CANCapture:
                 # Print stats periodically for long captures
                 current_time = time.time()
                 if self.writers and (current_time - last_stats_time) > 10:
-                    # Design (Phase 1.1): All writers get the same frames at the same FPS.
-                    # Stats are identical across writers, so reporting first writer is sufficient.
-                    # Future Enhancement (Phase 2): Multi-writer aggregation if writers operate independently.
                     stats = next(iter(self.writers.values())).get_stats()
                     fps = stats['fps']
                     elapsed = stats['elapsed_seconds']
@@ -275,14 +262,14 @@ class CANCapture:
     
     def _print_frame(self, frame_data, frame_num) -> None:
         """Print frame to console"""
-        if not config.SHOW_CONSOLE:
+        if self.config_manager.get_setting('capture', 'no_console'):
             return
         
         timestamp = datetime.fromtimestamp(frame_data['timestamp']).strftime("%H:%M:%S.%f")[:-3]
         print(f"[{frame_num:5d}] {timestamp} | ID: {frame_data['can_id']:>4s} | "
               f"DLC: {frame_data['dlc']} | Data: {frame_data['data_hex']}", end='')
         
-        if frame_data.get('parsed') and config.SHOW_PARSED:
+        if frame_data.get('parsed') and self.config_manager.get_setting('capture', 'show_parsed'):
             signals = frame_data['parsed']
             signal_str = ' | '.join(f"{k}={v}" for k, v in signals.items())
             print(f" | Signals: {signal_str}")
@@ -331,6 +318,25 @@ USAGE:
         '''
     )
     
+    # CAN settings
+    parser.add_argument(
+        '--interface', default=None,
+        help='CAN interface to use (e.g., cantact, slcan)'
+    )
+    parser.add_argument(
+        '--bitrate', type=int, default=None,
+        help='CAN bitrate in bps (default: 500000)'
+    )
+    parser.add_argument(
+        '--port', default=None,
+        help='Serial port for CANable device (e.g., COM3, /dev/ttyUSB0)'
+    )
+
+    # Capture settings
+    parser.add_argument(
+        '--mode', default=None, choices=['console', 'duration', 'count'],
+        help='Capture mode: console (default), duration, or count'
+    )
     parser.add_argument(
         '--duration', type=int, default=None,
         help='Capture duration in seconds'
@@ -340,90 +346,87 @@ USAGE:
         help='Number of frames to capture'
     )
     parser.add_argument(
-        '--port', default=None,
-        help='Serial port for CANable device (e.g., COM3, /dev/ttyUSB0)'
+        '--no-console', action='store_true',
+        help='Disable console output'
     )
     parser.add_argument(
-        '--dbc', default=None,
-        help='Path to DBC file for signal decoding'
+        '--show-parsed', action='store_true',
+        help='Show parsed signal values in console (requires DBC)'
     )
+
+    # Output settings
     parser.add_argument(
-        '--bitrate', type=int, default=500000,
-        help='CAN bitrate in bps (default: 500000)'
+        '--output-dir', default=None,
+        help='Output directory for files (default: data)'
     )
     parser.add_argument(
         '--log', default=None,
         help='Log to files in formats: csv,json,txt (comma-separated, no spaces)'
     )
+
+    # DBC settings
     parser.add_argument(
-        '--output-dir', default='data',
-        help='Output directory for files (default: data)'
+        '--dbc', default=None,
+        help='Path to DBC file for signal decoding'
     )
-    parser.add_argument(
-        '--no-console', action='store_true',
-        help='Disable console output'
-    )
+
+    # Other settings
     parser.add_argument(
         '--filter-can-id', default=None,
         help='Filter by CAN ID(s): comma-separated hex values (e.g., 0x123,0x456 or 0x123)'
     )
-    
+
     args = parser.parse_args()
-    
-    # Validate DBC file if provided
-    if args.dbc and not Path(args.dbc).exists():
-        print(f"[ERROR] DBC file not found: {args.dbc}")
-        return 1
-    
-    # Parse log formats
-    log_formats = None
-    if args.log:
-        log_formats = [fmt.strip() for fmt in args.log.split(',')]
-        # Validate formats
-        valid_formats = {'csv', 'json', 'txt'}
-        for fmt in log_formats:
-            if fmt not in valid_formats:
-                print(f"[ERROR] Invalid log format '{fmt}'. Valid: csv, json, txt")
-                return 1
-    
-    # Parse CAN ID filter
-    filter_can_ids = []
+
+    # Pre-process complex arguments
     if args.filter_can_id:
         try:
-            can_id_strs = [s.strip() for s in args.filter_can_id.split(',')]
-            for can_id_str in can_id_strs:
+            filter_can_ids = []
+            for can_id_str in args.filter_can_id.split(','):
                 # Parse hex or decimal
                 if can_id_str.lower().startswith('0x'):
                     can_id = int(can_id_str, 16)
                 else:
                     can_id = int(can_id_str)
                 filter_can_ids.append(can_id)
-        except ValueError as e:
-            print(f"[ERROR] Invalid CAN ID format: {args.filter_can_id}")
-            print(f"  Use hex format (e.g., 0x123) or decimal (e.g., 291)")
+            args.filter_can_id = filter_can_ids
+        except ValueError:
+            print(f"[ERROR] Invalid CAN ID filter format: {args.filter_can_id}")
+            print("Expected format: comma-separated hex values (e.g., 0x123,0x456)")
             return 1
     
+    if args.log:
+        try:
+            log_formats = []
+            for fmt in args.log.split(','):
+                fmt = fmt.strip().lower()
+                log_formats.append(fmt)
+            args.log = log_formats
+        except Exception as e:
+            print(f"[ERROR] Invalid log format: {args.log}")
+            print("Expected format: comma-separated values (e.g., csv,json)")
+            return 1
+
+    # Update config
+    try:
+        config_manager = ConfigManager()
+        config_manager.load_defaults_conf()
+        #config_manager.load_user_conf(Path('config.yaml')) # Optional user config file not implemeted yet
+        config_manager.load_env_conf()
+        config_manager.load_args_conf(args)
+        config_manager.validate_config()
+    except Exception as e:
+        print(f"[ERROR] Configuration error: {e}")
+        return 1
+    
     # Create capturer
-    capturer = CANCapture(
-        dbc_file=args.dbc,
-        bitrate=args.bitrate,
-        serial_port=args.port,
-        log_formats=log_formats,
-        filter_can_ids=filter_can_ids
-    )
-    
-    # Set output directory
-    capturer.output_dir = args.output_dir
-    
-    # Update config for console output
-    config.OUTPUT_DIR = args.output_dir
-    config.SHOW_CONSOLE = not args.no_console
+    capturer = CANCapture(config_manager)
     
     # Connect and capture
     if not capturer.connect():
         return 1
     
-    if not capturer.capture(duration=args.duration, count=args.count):
+    if not capturer.capture():
         return 1
     
     print("[OK] Done!")

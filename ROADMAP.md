@@ -115,6 +115,7 @@ Build extensible architecture that supports future growth without architectural 
 - `capture.py` → `cli/main.py` (entry point)
 - Logic → `capture/engine.py` (business logic)
 - Clean `__init__.py` exports
+- Note from the user: Use this phase to improve capture.py. It has too much responsabilites right now'
 
 ---
 

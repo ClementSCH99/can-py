@@ -1,0 +1,23 @@
+# CAN Interface Settings
+can:
+  interface: slcan
+  bitrate: 500000
+  serial_port: null
+
+# Capture Settings
+capture:
+  mode: console
+  duration: null
+  count: null
+  no_console: false
+  show_parsed: true
+
+# Output Settings
+output:
+  directory: data
+  formats: []
+
+# DBC Parsing
+dbc:
+  file: null
+  filter: null

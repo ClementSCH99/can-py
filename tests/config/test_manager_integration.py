@@ -22,7 +22,7 @@ class TestConfigManagerDefaults:
         
         assert cfg.get_setting('can', 'bitrate') == 500000
         assert cfg.get_setting('can', 'interface') == 'slcan'
-        assert cfg.get_setting('capture', 'mode') == 'console'
+        assert cfg.get_setting('capture', 'mode') == 'continuous'
         assert cfg.get_setting('output', 'directory') == 'data'
         assert cfg.get_setting('output', 'formats') == []
         assert cfg.get_setting('dbc', 'file') is None
@@ -395,6 +395,126 @@ class TestConfigManagerAccess:
         can_section = cfg.get_section('can')
         assert 'bitrate' in can_section
         assert 'interface' in can_section
+
+
+class TestConfigManagerUserConfigFile:
+    """Test user config file loading and precedence"""
+    
+    @pytest.fixture
+    def temp_user_config(self, tmp_path):
+        """Create a temporary user config file"""
+        config_file = tmp_path / "user_config.yaml"
+        config_file.write_text("""
+can:
+  bitrate: 250000
+  interface: cantact
+
+capture:
+  mode: duration
+  duration: 120
+
+output:
+  formats: [csv, json]
+
+dbc:
+  file: null
+  filter: null
+""")
+        return config_file
+    
+    def test_user_config_overrides_defaults(self, temp_user_config):
+        """Verify user config file overrides defaults"""
+        cfg = ConfigManager()
+        cfg.load_defaults_conf()
+        cfg.load_user_conf(temp_user_config)
+        cfg.validate_config()
+        
+        # User config values override defaults
+        assert cfg.get_setting('can', 'bitrate') == 250000
+        assert cfg.get_setting('can', 'interface') == 'cantact'
+        assert cfg.get_setting('capture', 'duration') == 120
+        assert cfg.get_setting('output', 'formats') == ['csv', 'json']
+    
+    def test_env_overrides_user_config(self, temp_user_config):
+        """Verify environment variables override user config"""
+        os.environ['CAN_BITRATE'] = '125000'
+        try:
+            cfg = ConfigManager()
+            cfg.load_defaults_conf()
+            cfg.load_user_conf(temp_user_config)
+            cfg.load_env_conf()
+            cfg.validate_config()
+            
+            # Env var overrides user config
+            assert cfg.get_setting('can', 'bitrate') == 125000
+            # User config still used for other values
+            assert cfg.get_setting('can', 'interface') == 'cantact'
+        finally:
+            del os.environ['CAN_BITRATE']
+    
+    def test_cli_args_override_user_config(self, temp_user_config):
+        """Verify CLI args override user config file"""
+        args = argparse.Namespace(
+            interface=None,
+            bitrate=1000000,  # Override user config's 250000
+            port=None,
+            mode=None,
+            duration=None,
+            count=None,
+            no_console=False,
+            show_parsed=False,
+            output_dir=None,
+            log=None,
+            dbc=None,
+            filter_can_id=None
+        )
+        
+        cfg = ConfigManager()
+        cfg.load_defaults_conf()
+        cfg.load_user_conf(temp_user_config)
+        cfg.load_env_conf()
+        cfg.load_args_conf(args)
+        cfg.validate_config()
+        
+        # CLI arg overrides user config
+        assert cfg.get_setting('can', 'bitrate') == 1000000
+        # User config still used for other values
+        assert cfg.get_setting('output', 'formats') == ['csv', 'json']
+    
+    def test_full_precedence_chain_with_user_config(self, temp_user_config):
+        """Verify full precedence: defaults → user_config → env → CLI"""
+        os.environ['CAPTURE_MODE'] = 'count'
+        try:
+            args = argparse.Namespace(
+                interface=None,
+                bitrate=None,  # Uses user config's 250000
+                port=None,
+                mode='duration',  # CLI overrides env var
+                duration=None,
+                count=None,
+                no_console=False,
+                show_parsed=False,
+                output_dir=None,
+                log=None,
+                dbc=None,
+                filter_can_id=None
+            )
+            
+            cfg = ConfigManager()
+            cfg.load_defaults_conf()
+            cfg.load_user_conf(temp_user_config)
+            cfg.load_env_conf()
+            cfg.load_args_conf(args)
+            cfg.validate_config()
+            
+            # CLI wins over env
+            assert cfg.get_setting('capture', 'mode') == 'duration'
+            # User config used over defaults (not overridden)
+            assert cfg.get_setting('can', 'bitrate') == 250000
+            # User config value preserved
+            assert cfg.get_setting('output', 'formats') == ['csv', 'json']
+        finally:
+            del os.environ['CAPTURE_MODE']
 
 
 if __name__ == '__main__':

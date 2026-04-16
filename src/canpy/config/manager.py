@@ -21,7 +21,7 @@ class ConfigManager:
         return value
     
     def _validate_capture_mode(self, value: str) -> str:
-        valid_modes = {'duration', 'count', 'console'}
+        valid_modes = {'duration', 'count', 'continuous'}
         if value not in valid_modes:
             raise ValueError(f"Invalid capture mode: {value}. Valid options are: {valid_modes}")
         return value
@@ -169,7 +169,7 @@ class ConfigManager:
         args_settings = {}
         for arg_name, (section, key, dtype) in args_mapping.items():
             value = getattr(args, arg_name, None)
-            if value is not None:
+            if value is not None and value is not False:  # Only include if value is set and not False (for bool flags)
                 if section not in args_settings:
                     args_settings[section] = {}
                 args_settings[section][key] = dtype(value)

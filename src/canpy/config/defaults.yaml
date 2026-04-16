@@ -6,7 +6,7 @@ can:
 
 # Capture Settings
 capture:
-  mode: console
+  mode: continuous
   duration: null
   count: null
   no_console: false

@@ -153,7 +153,7 @@ class CANCapture:
             expected_signals = None
         
         # Initialize writer if formats specified
-        log_formats = self.config_manager.get_setting('output', 'format')
+        log_formats = self.config_manager.get_setting('output', 'formats')
         output_dir = self.config_manager.get_setting('output', 'directory')
         if log_formats:
             for format in log_formats:
@@ -163,24 +163,44 @@ class CANCapture:
                 writer.start_streaming()
                 self.writers[format] = writer
         
-        print("\n" + "=" * 80)
-        print("Starting CAN capture...")
-        print("=" * 80)
-        
+        # Initialize the capture mode
+        mode = self.config_manager.get_setting('capture', 'mode') or 'continuous'
         duration = self.config_manager.get_setting('capture', 'duration')
         count = self.config_manager.get_setting('capture', 'count')
-        if duration:
+
+        if mode == 'duration':
+            if not duration:
+                raise ValueError("Duration mode selected but no duration specified. Set capture duration with --duration")
+            if duration and duration <= 0:
+                raise ValueError("Duration must be a positive integer")
+            if count:
+                print("[WARNING] Count specified but duration mode selected. Duration will take precedence.")
+            
             print(f"Capturing for {duration} seconds...")
-        elif count:
+
+        elif mode == 'count':
+            if not count:
+                raise ValueError("Count mode selected but no count specified. Set capture count with --count")
+            if count and count <= 0:
+                raise ValueError("Count must be a positive integer")
+            if duration:
+                print("[WARNING] Duration specified but count mode selected. Count will take precedence.")
+            
             print(f"Capturing {count} frames...")
-        else:
+
+        elif mode == 'continuous':
+            if duration or count:
+                print("[WARNING] Duration or count specified but continuous mode selected. Continuous mode will ignore these settings.")
+
             print("Capturing continuously (press Ctrl+C to stop)...")
         
+        # Initialize CAN ID filter
         filter_can_ids = self.config_manager.get_setting('dbc', 'filter') or []
         if filter_can_ids:
             filter_ids_hex = [f"0x{cid:03X}" for cid in sorted(filter_can_ids)]
             print(f"CAN ID Filter: {', '.join(filter_ids_hex)}")
         
+        # Initialize log formats
         log_formats = self.config_manager.get_setting('output', 'formats')
         if log_formats:
             print(f"Logging to: {', '.join(log_formats).upper()}")
@@ -188,6 +208,10 @@ class CANCapture:
             print("Output: Console only (like candump)")
         
         
+        print("\n" + "=" * 80)
+        print("Starting CAN capture...")
+        print("=" * 80)
+
         start_time = time.time()
         frame_count = 0
         last_stats_time = start_time
@@ -195,12 +219,12 @@ class CANCapture:
         try:
             while True:
                 # Check duration
-                if duration and (time.time() - start_time) > duration:
+                if mode == 'duration' and (time.time() - start_time) > duration:
                     print(f"\n[OK] Duration limit reached ({duration}s)")
                     break
                 
                 # Check count
-                if count and frame_count >= count:
+                if mode == 'count' and frame_count >= count:
                     print(f"\n[OK] Frame count limit reached ({count} frames)")
                     break
                 
@@ -293,9 +317,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 USAGE:
-  By default, frames are printed to console (like candump):
+  By default, frames are printed to console:
   
-  # Capture to console (30 seconds)
+  # Capture mode (default: continuous until Ctrl+C, or specify duration/count)
   python can_capture.py --duration 30
   
   # Capture and parse signals (requires DBC)
@@ -303,9 +327,6 @@ USAGE:
   
   # Save to files (CSV, JSON, or both)
   python can_capture.py --duration 30 --log csv,json --dbc car.dbc
-  
-  # Long recordings (3+ hours with streaming)
-  python can_capture.py --dbc car.dbc --log csv
   
   # Continuous capture (press Ctrl+C to stop)
   python can_capture.py --dbc car.dbc --log json
@@ -315,6 +336,9 @@ USAGE:
   
   # Filter by multiple CAN IDs
   python can_capture.py --duration 30 --filter-can-id 0x123,0x456,0x789
+
+  # Load specific user config file
+  python can_capture.py --config my_config.yaml
         '''
     )
     
@@ -334,8 +358,8 @@ USAGE:
 
     # Capture settings
     parser.add_argument(
-        '--mode', default=None, choices=['console', 'duration', 'count'],
-        help='Capture mode: console (default), duration, or count'
+        '--mode', default=None, choices=['duration', 'count', 'continuous'],
+        help='Capture mode: continuous (default), duration, or count'
     )
     parser.add_argument(
         '--duration', type=int, default=None,
@@ -375,6 +399,10 @@ USAGE:
         '--filter-can-id', default=None,
         help='Filter by CAN ID(s): comma-separated hex values (e.g., 0x123,0x456 or 0x123)'
     )
+    parser.add_argument(
+        '--config', default=None,
+        help='Path to user config YAML file (optional). Auto-detects ./user_config.yaml if not provided'
+    )
 
     args = parser.parse_args()
 
@@ -411,7 +439,13 @@ USAGE:
     try:
         config_manager = ConfigManager()
         config_manager.load_defaults_conf()
-        #config_manager.load_user_conf(Path('config.yaml')) # Optional user config file not implemeted yet
+        if args.config:
+            config_manager.load_user_conf(Path(args.config))
+            print(f"[OK] Loaded user config from {args.config}")
+        else:
+            if Path('user_config.yaml').exists():
+                config_manager.load_user_conf(Path('user_config.yaml'))  # Auto-detect user config file
+                print(f"[OK] Loaded user config from ./user_config.yaml")
         config_manager.load_env_conf()
         config_manager.load_args_conf(args)
         config_manager.validate_config()

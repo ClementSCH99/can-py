@@ -52,6 +52,16 @@ class TestQueryFilterValidation:
         """Time range with start > end raises ValueError."""
         with pytest.raises(ValueError, match="time_start must be less than or equal to time_end"):
             QueryFilter(time_start=20.0, time_end=10.0)
+
+    def test_invalid_time_start_type_raises(self):
+        """Non-numeric time_start values are rejected during construction."""
+        with pytest.raises(ValueError, match="time_start must be a number if provided"):
+            QueryFilter(time_start="10.0")
+
+    def test_invalid_time_end_type_raises(self):
+        """Non-numeric time_end values are rejected during construction."""
+        with pytest.raises(ValueError, match="time_end must be a number if provided"):
+            QueryFilter(time_end="20.0")
     
     def test_valid_can_ids_list_of_ints(self):
         """CAN IDs as list of integers is valid."""

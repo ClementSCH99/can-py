@@ -64,12 +64,15 @@ class CsvRepository(BaseRepository):
             raise FileNotFoundError(f"File {file_path} does not exist. Please provide a valid file path.")
         
         instance = cls(file_path, expected_signals)
-        instance._file = open(file_path, 'r', newline='', encoding='utf-8')
-        instance._mode = 'r'
-        instance._header_written = True
+        try:
+            instance._file = open(file_path, 'r', newline='', encoding='utf-8')
+            instance._mode = 'r'
+            instance._header_written = True
 
-        reader = csv.DictReader(instance._file)
-        if reader.fieldnames:
+            reader = csv.DictReader(instance._file)
+            if not reader.fieldnames:
+                raise ValueError("CSV file is missing header row. Please ensure the file has a valid header with required fields.")
+
             missing_fields = [field for field in cls._BASE_FIELDNAMES if field not in reader.fieldnames]
             if missing_fields:
                 raise ValueError(f"Missing required CSV fields: {', '.join(missing_fields)}")
@@ -77,10 +80,17 @@ class CsvRepository(BaseRepository):
             instance._signal_fieldnames = [
                 field for field in reader.fieldnames if field not in cls._BASE_FIELDNAMES
             ]
-        else:
-            instance._fieldnames = list(cls._BASE_FIELDNAMES)
-            instance._signal_fieldnames = []
-        return instance
+            return instance
+        except Exception:
+            if instance._file is not None:
+                try:
+                    instance._file.close()
+                except Exception:
+                    pass
+                finally:
+                    instance._file = None
+            instance._mode = None
+            raise
     
     def get_frames(self, query_filter: Optional[QueryFilter] = None) -> Generator[CANFrame, None, None]:
         """Generator that yields CANFrames matching the query filter."""
@@ -240,4 +250,5 @@ class CsvRepository(BaseRepository):
         self._header_written = True
 
 
+# Compatibility alias for backward compatibility
 CSVRepository = CsvRepository

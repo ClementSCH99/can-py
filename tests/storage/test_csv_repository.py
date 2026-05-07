@@ -1,5 +1,6 @@
 """Comprehensive tests for CSVRepository implementation."""
 
+import io
 import os
 import tempfile
 from pathlib import Path
@@ -393,6 +394,25 @@ class TestCSVRepositoryRead:
         assert len(frames1) == 3
         assert len(frames2) == 1
 
+    def test_get_frames_is_lazy_and_defers_row_parsing(self, temp_dir):
+        """Verify malformed rows are only parsed when iteration reaches them."""
+        file_path = os.path.join(temp_dir, 'lazy_parse.csv')
+
+        with open(file_path, 'w', encoding='utf-8', newline='') as handle:
+            handle.write('timestamp,can_id,dlc,data_hex\n')
+            handle.write('1.0,0x123,8,01 02 03 04 05 06 07 08\n')
+            handle.write('not-a-float,0x456,8,11 22 33 44 55 66 77 88\n')
+
+        with CsvRepository.open(file_path) as repo:
+            frames = repo.get_frames(QueryFilter())
+
+            first_frame = next(frames)
+            assert first_frame.timestamp == 1.0
+            assert first_frame.can_id == 0x123
+
+            with pytest.raises(ValueError, match='Failed to parse CSV row'):
+                next(frames)
+
     def test_type_conversions(self, temp_dir):
         """Verify type conversions from CSV to CANFrame."""
         file_path = os.path.join(temp_dir, 'type_conversion.csv')
@@ -540,6 +560,60 @@ class TestCSVRepositoryIntegration:
 
 class TestCSVRepositoryErrors:
     """Test error conditions and validation."""
+
+    def test_open_raises_on_missing_header_row(self, temp_dir):
+        """Verify open() rejects an existing CSV file with no header row."""
+        file_path = os.path.join(temp_dir, 'missing_header.csv')
+        Path(file_path).touch()
+
+        with pytest.raises(ValueError, match='missing header row'):
+            CsvRepository.open(file_path)
+
+    def test_open_raises_on_missing_required_fields(self, temp_dir):
+        """Verify open() rejects a CSV file missing required base fields."""
+        file_path = os.path.join(temp_dir, 'missing_required_fields.csv')
+
+        with open(file_path, 'w', encoding='utf-8', newline='') as handle:
+            handle.write('timestamp,can_id,data_hex\n')
+            handle.write('1.0,0x123,01 02 03 04\n')
+
+        with pytest.raises(ValueError, match='Missing required CSV fields: dlc'):
+            CsvRepository.open(file_path)
+
+    def test_open_closes_file_on_header_validation_error(self, monkeypatch, temp_dir):
+        """Verify open() closes the file handle if header validation fails."""
+        file_path = os.path.join(temp_dir, 'tracked_missing_required_fields.csv')
+        Path(file_path).touch()
+
+        class TrackingStringIO(io.StringIO):
+            def __init__(self, initial_value: str):
+                super().__init__(initial_value)
+                self.close_called = False
+
+            def close(self):
+                self.close_called = True
+                super().close()
+
+        tracked_file = TrackingStringIO('timestamp,can_id,data_hex\n1.0,0x123,01 02 03 04\n')
+        monkeypatch.setattr('builtins.open', lambda *args, **kwargs: tracked_file)
+
+        with pytest.raises(ValueError, match='Missing required CSV fields: dlc'):
+            CsvRepository.open(file_path)
+
+        assert tracked_file.close_called is True
+        assert tracked_file.closed is True
+
+    def test_get_frames_raises_on_malformed_row(self, temp_dir):
+        """Verify get_frames() raises when a CSV row cannot be converted to CANFrame."""
+        file_path = os.path.join(temp_dir, 'malformed_row.csv')
+
+        with open(file_path, 'w', encoding='utf-8', newline='') as handle:
+            handle.write('timestamp,can_id,dlc,data_hex\n')
+            handle.write('bad-timestamp,0x123,8,01 02 03 04 05 06 07 08\n')
+
+        with CsvRepository.open(file_path) as repo:
+            with pytest.raises(ValueError, match='Failed to parse CSV row'):
+                list(repo.get_frames(QueryFilter()))
 
     def test_cannot_get_frames_on_write_repo(self, temp_dir):
         """Verify get_frames() raises error on write-mode repo."""

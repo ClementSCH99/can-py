@@ -21,6 +21,14 @@ class QueryFilter:
 
 
     def __post_init__(self):
+        for field_name in ('time_start', 'time_end'):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{field_name} must be a number if provided")
+            setattr(self, field_name, float(value))
+
         if self.time_start is not None and self.time_end is not None:
             if self.time_start > self.time_end:
                 raise ValueError("time_start must be less than or equal to time_end")

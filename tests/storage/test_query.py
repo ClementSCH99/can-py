@@ -12,8 +12,8 @@ class TestQueryFilterConstruction:
         """All fields default to None — no filters applied."""
         q = QueryFilter()
         assert q.can_ids is None
-        assert q.start_time is None
-        assert q.end_time is None
+        assert q.time_start is None
+        assert q.time_end is None
         assert q.limit is None
     
     def test_construction_with_can_ids(self):
@@ -23,9 +23,9 @@ class TestQueryFilterConstruction:
     
     def test_construction_with_time_range(self):
         """Can specify time range."""
-        q = QueryFilter(start_time=10.0, end_time=20.0)
-        assert q.start_time == 10.0
-        assert q.end_time == 20.0
+        q = QueryFilter(time_start=10.0, time_end=20.0)
+        assert q.time_start == 10.0
+        assert q.time_end == 20.0
     
     def test_construction_with_limit(self):
         """Can specify limit."""
@@ -38,20 +38,20 @@ class TestQueryFilterValidation:
     
     def test_valid_time_range_start_less_than_end(self):
         """Time range with start < end is valid."""
-        q = QueryFilter(start_time=5.0, end_time=15.0)
-        assert q.start_time == 5.0
-        assert q.end_time == 15.0
+        q = QueryFilter(time_start=5.0, time_end=15.0)
+        assert q.time_start == 5.0
+        assert q.time_end == 15.0
     
     def test_valid_time_range_start_equals_end(self):
         """Time range with start == end is valid (single point in time)."""
-        q = QueryFilter(start_time=10.0, end_time=10.0)
-        assert q.start_time == 10.0
-        assert q.end_time == 10.0
+        q = QueryFilter(time_start=10.0, time_end=10.0)
+        assert q.time_start == 10.0
+        assert q.time_end == 10.0
     
     def test_invalid_time_range_start_greater_than_end(self):
         """Time range with start > end raises ValueError."""
-        with pytest.raises(ValueError, match="start_time must be less than or equal to end_time"):
-            QueryFilter(start_time=20.0, end_time=10.0)
+        with pytest.raises(ValueError, match="time_start must be less than or equal to time_end"):
+            QueryFilter(time_start=20.0, time_end=10.0)
     
     def test_valid_can_ids_list_of_ints(self):
         """CAN IDs as list of integers is valid."""
@@ -157,7 +157,7 @@ class TestQueryFilterMatching:
     
     def test_time_range_filter_start_only(self, sample_frames):
         """Filter by start time only (>= start_time)."""
-        q = QueryFilter(start_time=10.0)
+        q = QueryFilter(time_start=10.0)
         assert q.matches(sample_frames["frame_id_0x100"]) is False  # 5.0 < 10.0
         assert q.matches(sample_frames["frame_id_0x200"]) is True   # 10.0 >= 10.0
         assert q.matches(sample_frames["frame_id_0x300"]) is True   # 15.0 >= 10.0
@@ -165,7 +165,7 @@ class TestQueryFilterMatching:
     
     def test_time_range_filter_end_only(self, sample_frames):
         """Filter by end time only (<= end_time)."""
-        q = QueryFilter(end_time=12.0)
+        q = QueryFilter(time_end=12.0)
         assert q.matches(sample_frames["frame_id_0x100"]) is True   # 5.0 <= 12.0
         assert q.matches(sample_frames["frame_id_0x200"]) is True   # 10.0 <= 12.0
         assert q.matches(sample_frames["frame_id_0x300"]) is False  # 15.0 > 12.0
@@ -173,7 +173,7 @@ class TestQueryFilterMatching:
     
     def test_time_range_filter_both_start_and_end(self, sample_frames):
         """Filter by time range (start_time <= timestamp <= end_time)."""
-        q = QueryFilter(start_time=8.0, end_time=18.0)
+        q = QueryFilter(time_start=8.0, time_end=18.0)
         assert q.matches(sample_frames["frame_id_0x100"]) is False       # 5.0 < 8.0
         assert q.matches(sample_frames["frame_id_0x200"]) is True        # 10.0 in [8.0, 18.0]
         assert q.matches(sample_frames["frame_id_0x300"]) is True        # 15.0 in [8.0, 18.0]
@@ -181,13 +181,13 @@ class TestQueryFilterMatching:
     
     def test_time_range_filter_exact_boundaries(self, sample_frames):
         """Time range filters at exact boundary times."""
-        q = QueryFilter(start_time=5.0, end_time=20.0)
+        q = QueryFilter(time_start=5.0, time_end=20.0)
         assert q.matches(sample_frames["frame_id_0x100"]) is True        # 5.0 == start
         assert q.matches(sample_frames["frame_id_0x100_later"]) is True  # 20.0 == end
     
     def test_combined_can_id_and_time_filter(self, sample_frames):
         """Both filters must pass (AND logic)."""
-        q = QueryFilter(can_ids=[0x100], start_time=8.0, end_time=18.0)
+        q = QueryFilter(can_ids=[0x100], time_start=8.0, time_end=18.0)
         # Only frame_id_0x100_later matches: ID is 0x100 AND 20.0 is outside range
         assert q.matches(sample_frames["frame_id_0x100"]) is False       # right ID, wrong time
         assert q.matches(sample_frames["frame_id_0x200"]) is False       # wrong ID
@@ -195,7 +195,7 @@ class TestQueryFilterMatching:
         assert q.matches(sample_frames["frame_id_0x100_later"]) is False # right ID, but 20.0 > 18.0
         
         # Now with a wider time range
-        q2 = QueryFilter(can_ids=[0x100], start_time=5.0, end_time=20.0)
+        q2 = QueryFilter(can_ids=[0x100], time_start=5.0, time_end=20.0)
         assert q2.matches(sample_frames["frame_id_0x100"]) is True        # both conditions pass
         assert q2.matches(sample_frames["frame_id_0x100_later"]) is True  # both conditions pass
         assert q2.matches(sample_frames["frame_id_0x200"]) is False       # wrong ID
@@ -227,7 +227,7 @@ class TestQueryFilterEdgeCases:
     def test_zero_timestamp(self):
         """Filtering works with zero timestamps (start of capture)."""
         frame = CANFrame(timestamp=0.0, can_id=0x100, dlc=8, data=b'\x00' * 8)
-        q = QueryFilter(start_time=0.0, end_time=10.0)
+        q = QueryFilter(time_start=0.0, time_end=10.0)
         assert q.matches(frame) is True
     
     def test_large_can_id_value(self):
@@ -244,13 +244,13 @@ class TestQueryFilterEdgeCases:
     def test_negative_timestamps(self):
         """Filtering works with negative timestamps (shouldn't normally happen, but robustness)."""
         frame = CANFrame(timestamp=-5.0, can_id=0x100, dlc=8, data=b'\x00' * 8)
-        q = QueryFilter(start_time=-10.0, end_time=0.0)
+        q = QueryFilter(time_start=-10.0, time_end=0.0)
         assert q.matches(frame) is True
     
     def test_very_large_time_ranges(self):
         """Filtering works with very large time ranges."""
         frame = CANFrame(timestamp=1000000.0, can_id=0x100, dlc=8, data=b'\x00' * 8)
-        q = QueryFilter(start_time=0.0, end_time=1e9)
+        q = QueryFilter(time_start=0.0, time_end=1e9)
         assert q.matches(frame) is True
 
 
@@ -259,8 +259,8 @@ class TestQueryFilterRepr:
     
     def test_repr_shows_all_fields(self):
         """__repr__ includes all filter fields."""
-        q = QueryFilter(can_ids=[0x100], start_time=5.0, end_time=15.0, limit=50)
+        q = QueryFilter(can_ids=[0x100], time_start=5.0, time_end=15.0, limit=50)
         repr_str = repr(q)
-        # Dataclass repr should show: QueryFilter(can_ids=[...], start_time=5.0, ...)
+        # Dataclass repr should show: QueryFilter(can_ids=[...], time_start=5.0, ...)
         assert "QueryFilter" in repr_str
         assert "0x100" in repr_str or "256" in repr_str  # 0x100 in hex or decimal

@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from canpy import BaseRepository, CsvRepository, QueryFilter
 from canpy.storage.csv_repository import CSVRepository
 from canpy.storage.frame import CANFrame
-from canpy.storage.query import QueryFilter
+from canpy.writers.csv_writer import CSVWriter
 
 
 @pytest.fixture
@@ -80,10 +81,15 @@ def sample_frames():
 class TestCSVRepositoryFactories:
     """Test create() and open() factory methods."""
 
+    def test_public_api_exports_roadmap_names(self):
+        """Verify the roadmap public API is exported from canpy."""
+        assert issubclass(CsvRepository, BaseRepository)
+        assert CSVRepository is CsvRepository
+
     def test_create_opens_file_for_writing(self, temp_dir):
         """Verify create() opens a file in write mode."""
         file_path = os.path.join(temp_dir, 'test_write.csv')
-        repo = CSVRepository.create(file_path)
+        repo = CsvRepository.create(file_path)
         
         assert repo._file is not None
         assert repo._mode == 'w'
@@ -100,26 +106,26 @@ class TestCSVRepositoryFactories:
         Path(file_path).touch()
         
         with pytest.raises(FileExistsError):
-            CSVRepository.create(file_path)
+            CsvRepository.create(file_path)
 
     def test_create_raises_directory_not_found_error(self):
         """Verify create() raises error if directory doesn't exist."""
         file_path = '/nonexistent/path/file.csv'
         
         with pytest.raises(FileNotFoundError):
-            CSVRepository.create(file_path)
+            CsvRepository.create(file_path)
 
     def test_open_opens_file_for_reading(self, temp_dir, sample_frame):
         """Verify open() opens an existing file in read mode."""
         file_path = os.path.join(temp_dir, 'test_read.csv')
         
         # First create and write a frame
-        repo_write = CSVRepository.create(file_path)
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(sample_frame)
         repo_write.close()
         
         # Now open for reading
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         
         assert repo_read._file is not None
         assert repo_read._mode == 'r'
@@ -130,13 +136,13 @@ class TestCSVRepositoryFactories:
     def test_open_raises_file_not_found_error(self):
         """Verify open() raises error if file doesn't exist."""
         with pytest.raises(FileNotFoundError):
-            CSVRepository.open('/nonexistent/file.csv')
+            CsvRepository.open('/nonexistent/file.csv')
 
     def test_context_manager_write(self, temp_dir, sample_frame):
         """Verify context manager works with create()."""
         file_path = os.path.join(temp_dir, 'test_context_write.csv')
         
-        with CSVRepository.create(file_path) as repo:
+        with CsvRepository.create(file_path) as repo:
             repo.save_frame(sample_frame)
             assert repo._file is not None
         
@@ -149,12 +155,12 @@ class TestCSVRepositoryFactories:
         file_path = os.path.join(temp_dir, 'test_context_read.csv')
         
         # Create file
-        repo_write = CSVRepository.create(file_path)
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(sample_frame)
         repo_write.close()
         
         # Read with context manager
-        with CSVRepository.open(file_path) as repo:
+        with CsvRepository.open(file_path) as repo:
             frames = list(repo.get_frames(QueryFilter()))
             assert len(frames) == 1
         
@@ -172,7 +178,7 @@ class TestCSVRepositoryWrite:
     def test_save_single_frame(self, temp_dir, sample_frame):
         """Verify save_frame() writes a frame to CSV."""
         file_path = os.path.join(temp_dir, 'single_frame.csv')
-        repo = CSVRepository.create(file_path)
+        repo = CsvRepository.create(file_path)
         
         repo.save_frame(sample_frame)
         repo.close()
@@ -185,7 +191,7 @@ class TestCSVRepositoryWrite:
     def test_save_multiple_frames(self, temp_dir, sample_frames):
         """Verify save_frame() writes multiple frames."""
         file_path = os.path.join(temp_dir, 'multiple_frames.csv')
-        repo = CSVRepository.create(file_path)
+        repo = CsvRepository.create(file_path)
         
         for frame in sample_frames:
             repo.save_frame(frame)
@@ -200,7 +206,7 @@ class TestCSVRepositoryWrite:
     def test_count_during_write(self, temp_dir, sample_frames):
         """Verify count() returns correct frame count during write."""
         file_path = os.path.join(temp_dir, 'count_write.csv')
-        repo = CSVRepository.create(file_path)
+        repo = CsvRepository.create(file_path)
         
         assert repo.count() == 0
         
@@ -213,16 +219,13 @@ class TestCSVRepositoryWrite:
     def test_frame_fields_preserved(self, temp_dir, sample_frame):
         """Verify all frame fields are preserved in CSV."""
         file_path = os.path.join(temp_dir, 'fields_preserved.csv')
-        
-        # Declare signals upfront (required for CSV)
-        signals = set(sample_frame.parsed_signals.keys()) if sample_frame.parsed_signals else set()
-        repo = CSVRepository.create(file_path, expected_signals=signals)
+        repo = CsvRepository.create(file_path)
         
         repo.save_frame(sample_frame)
         repo.close()
         
         # Read back and verify
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         frames = list(repo_read.get_frames(QueryFilter()))
         repo_read.close()
         
@@ -236,19 +239,14 @@ class TestCSVRepositoryWrite:
         assert read_frame.parsed_signals == sample_frame.parsed_signals
 
     def test_different_signals_per_frame(self, temp_dir):
-        """Verify frames with different signals are handled (with all signals declared upfront)."""
+        """Verify frames with different signals are handled without signal loss."""
         file_path = os.path.join(temp_dir, 'diff_signals.csv')
         
         frame1 = CANFrame(1.0, 0x100, 8, b'\x00' * 8, {'speed': 10.0})
         frame2 = CANFrame(2.0, 0x200, 8, b'\x00' * 8, {'temp': 25.0, 'humidity': 60.0})
         frame3 = CANFrame(3.0, 0x100, 8, b'\x00' * 8, {'speed': 20.0})
         
-        # Must declare all signals upfront (no dynamic discovery)
-        # This is the professional way to handle CSV - explicit contract
-        repo = CSVRepository.create(
-            file_path,
-            expected_signals={'speed', 'temp', 'humidity'}
-        )
+        repo = CsvRepository.create(file_path)
         repo.save_frame(frame1)
         repo.save_frame(frame2)
         repo.save_frame(frame3)
@@ -258,7 +256,7 @@ class TestCSVRepositoryWrite:
         with open(file_path, 'r') as f:
             lines = f.readlines()
             assert len(lines) == 4  # Header + 3 rows
-            # Header should have all declared signals
+            # Header should have all discovered signals
             header = lines[0]
             assert 'speed' in header
             assert 'temp' in header
@@ -282,8 +280,7 @@ class TestCSVRepositoryRead:
             if frame.parsed_signals:
                 all_signals.update(frame.parsed_signals.keys())
         
-        # Create repo with all signals declared upfront
-        repo = CSVRepository.create(file_path, expected_signals=all_signals)
+        repo = CsvRepository.create(file_path)
         for frame in sample_frames:
             repo.save_frame(frame)
         repo.close()
@@ -293,7 +290,7 @@ class TestCSVRepositoryRead:
         """Verify get_frames() yields all frames."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
+        repo = CsvRepository.open(file_path)
         frames = list(repo.get_frames(QueryFilter()))
         repo.close()
         
@@ -303,7 +300,7 @@ class TestCSVRepositoryRead:
         """Verify get_frames() filters by CAN ID."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
+        repo = CsvRepository.open(file_path)
         query = QueryFilter(can_ids=[0x100])
         frames = list(repo.get_frames(query))
         repo.close()
@@ -317,7 +314,7 @@ class TestCSVRepositoryRead:
         """Verify get_frames() filters by multiple CAN IDs."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
+        repo = CsvRepository.open(file_path)
         query = QueryFilter(can_ids=[0x100, 0x200])
         frames = list(repo.get_frames(query))
         repo.close()
@@ -331,8 +328,8 @@ class TestCSVRepositoryRead:
         """Verify get_frames() filters by time range."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
-        query = QueryFilter(start_time=2.0, end_time=4.0)
+        repo = CsvRepository.open(file_path)
+        query = QueryFilter(time_start=2.0, time_end=4.0)
         frames = list(repo.get_frames(query))
         repo.close()
         
@@ -345,7 +342,7 @@ class TestCSVRepositoryRead:
         """Verify get_frames() respects limit."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
+        repo = CsvRepository.open(file_path)
         query = QueryFilter(limit=3)
         frames = list(repo.get_frames(query))
         repo.close()
@@ -356,8 +353,8 @@ class TestCSVRepositoryRead:
         """Verify get_frames() with combined filters."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
-        query = QueryFilter(can_ids=[0x100], start_time=1.0, end_time=5.0, limit=2)
+        repo = CsvRepository.open(file_path)
+        query = QueryFilter(can_ids=[0x100], time_start=1.0, time_end=5.0, limit=2)
         frames = list(repo.get_frames(query))
         repo.close()
         
@@ -371,7 +368,7 @@ class TestCSVRepositoryRead:
         """Verify count() returns correct total for existing file."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
+        repo = CsvRepository.open(file_path)
         count = repo.count()
         repo.close()
         
@@ -381,7 +378,7 @@ class TestCSVRepositoryRead:
         """Verify multiple get_frames() calls work correctly."""
         file_path = self._setup_test_file(temp_dir, sample_frames)
         
-        repo = CSVRepository.open(file_path)
+        repo = CsvRepository.open(file_path)
         
         # First query
         query1 = QueryFilter(can_ids=[0x100])
@@ -409,13 +406,12 @@ class TestCSVRepositoryRead:
             parsed_signals={'signal1': 99.99, 'signal2': 'text_value'}
         )
         
-        # Declare signals upfront
-        repo_write = CSVRepository.create(file_path, expected_signals={'signal1', 'signal2'})
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(frame)
         repo_write.close()
         
         # Read back and verify types
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         frames = list(repo_read.get_frames(QueryFilter()))
         repo_read.close()
         
@@ -458,14 +454,13 @@ class TestCSVRepositoryIntegration:
             if frame.parsed_signals:
                 all_signals.update(frame.parsed_signals.keys())
         
-        # Write with all signals declared
-        repo_write = CSVRepository.create(file_path, expected_signals=all_signals)
+        repo_write = CsvRepository.create(file_path)
         for frame in sample_frames:
             repo_write.save_frame(frame)
         repo_write.close()
         
         # Read
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         read_frames = list(repo_read.get_frames(QueryFilter()))
         repo_read.close()
         
@@ -491,22 +486,22 @@ class TestCSVRepositoryIntegration:
             frames.append(frame)
         
         # Write all
-        repo_write = CSVRepository.create(file_path)
+        repo_write = CsvRepository.create(file_path)
         for frame in frames:
             repo_write.save_frame(frame)
         repo_write.close()
         
         # Query: CAN ID 0x100 only
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         query1 = QueryFilter(can_ids=[0x100])
         results1 = list(repo_read.get_frames(query1))
         
         # Query: time 20-30
-        query2 = QueryFilter(start_time=20.0, end_time=30.0)
+        query2 = QueryFilter(time_start=20.0, time_end=30.0)
         results2 = list(repo_read.get_frames(query2))
         
         # Query: combined
-        query3 = QueryFilter(can_ids=[0x200], start_time=10.0, end_time=50.0, limit=5)
+        query3 = QueryFilter(can_ids=[0x200], time_start=10.0, time_end=50.0, limit=5)
         results3 = list(repo_read.get_frames(query3))
         
         repo_read.close()
@@ -515,6 +510,28 @@ class TestCSVRepositoryIntegration:
         assert len(results1) == 50  # Even indices
         assert len(results2) == 11  # 20-30 inclusive
         assert len(results3) == 5   # Limited to 5
+
+    def test_open_reads_csv_writer_output(self, temp_dir):
+        """Verify repository can read files produced by CSVWriter."""
+        writer = CSVWriter(output_dir=temp_dir, expected_signals={'speed', 'status'})
+        filepaths = writer.start_streaming(filename='writer_capture')
+        writer.write_frame({
+            'timestamp': 12.5,
+            'can_id': '0x123',
+            'dlc': 8,
+            'data_hex': '01 02 03 04 05 06 07 08',
+            'parsed': {'speed': 88.5, 'status': 'ready'},
+        })
+        writer.stop_streaming()
+
+        repo = CsvRepository.open(filepaths['csv'])
+        frames = list(repo.get_frames(QueryFilter(can_ids=[0x123])))
+        repo.close()
+
+        assert len(frames) == 1
+        assert frames[0].timestamp == 12.5
+        assert frames[0].can_id == 0x123
+        assert frames[0].parsed_signals == {'speed': 88.5, 'status': 'ready'}
 
 
 # ============================================================================
@@ -527,7 +544,7 @@ class TestCSVRepositoryErrors:
     def test_cannot_get_frames_on_write_repo(self, temp_dir):
         """Verify get_frames() raises error on write-mode repo."""
         file_path = os.path.join(temp_dir, 'write_only.csv')
-        repo = CSVRepository.create(file_path)
+        repo = CsvRepository.create(file_path)
         
         with pytest.raises(RuntimeError, match="not open for reading"):
             list(repo.get_frames(QueryFilter()))
@@ -539,12 +556,12 @@ class TestCSVRepositoryErrors:
         file_path = os.path.join(temp_dir, 'read_only.csv')
         
         # Create file first
-        repo_write = CSVRepository.create(file_path)
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(sample_frame)
         repo_write.close()
         
         # Try to save on read-mode repo
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         
         with pytest.raises(RuntimeError, match="not open for writing"):
             repo_read.save_frame(sample_frame)
@@ -553,21 +570,21 @@ class TestCSVRepositoryErrors:
 
     def test_cannot_count_uninitialized_repo(self):
         """Verify count() raises error on uninitialized repo."""
-        repo = CSVRepository('dummy.csv')
+        repo = CsvRepository('dummy.csv')
         
         with pytest.raises(RuntimeError, match="not open"):
             repo.count()
 
     def test_cannot_save_frame_uninitialized_repo(self, sample_frame):
         """Verify save_frame() raises error on uninitialized repo."""
-        repo = CSVRepository('dummy.csv')
+        repo = CsvRepository('dummy.csv')
         
         with pytest.raises(RuntimeError, match="not open for writing"):
             repo.save_frame(sample_frame)
 
     def test_cannot_get_frames_uninitialized_repo(self):
         """Verify get_frames() raises error on uninitialized repo."""
-        repo = CSVRepository('dummy.csv')
+        repo = CsvRepository('dummy.csv')
         
         with pytest.raises(RuntimeError, match="not open for reading"):
             list(repo.get_frames(QueryFilter()))
@@ -585,11 +602,11 @@ class TestCSVRepositoryEdgeCases:
         file_path = os.path.join(temp_dir, 'empty.csv')
         
         # Create empty file with just header
-        repo = CSVRepository.create(file_path)
+        repo = CsvRepository.create(file_path)
         repo.close()
         
         # Open and read
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         frames = list(repo_read.get_frames(QueryFilter()))
         count = repo_read.count()
         repo_read.close()
@@ -601,13 +618,11 @@ class TestCSVRepositoryEdgeCases:
         """Verify handling of single frame."""
         file_path = os.path.join(temp_dir, 'single.csv')
         
-        # Declare signals upfront
-        signals = set(sample_frame.parsed_signals.keys()) if sample_frame.parsed_signals else set()
-        repo_write = CSVRepository.create(file_path, expected_signals=signals)
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(sample_frame)
         repo_write.close()
         
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         frames = list(repo_read.get_frames(QueryFilter()))
         repo_read.close()
         
@@ -626,12 +641,11 @@ class TestCSVRepositoryEdgeCases:
             parsed_signals=None
         )
         
-        # Empty signal set (no signals expected)
-        repo_write = CSVRepository.create(file_path, expected_signals=set())
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(frame)
         repo_write.close()
         
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         frames = list(repo_read.get_frames(QueryFilter()))
         repo_read.close()
         
@@ -652,12 +666,11 @@ class TestCSVRepositoryEdgeCases:
             parsed_signals=signals
         )
         
-        # Declare all 50 signals upfront
-        repo_write = CSVRepository.create(file_path, expected_signals=set(signals.keys()))
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(frame)
         repo_write.close()
         
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         frames = list(repo_read.get_frames(QueryFilter()))
         repo_read.close()
         
@@ -676,12 +689,11 @@ class TestCSVRepositoryEdgeCases:
             parsed_signals=None
         )
         
-        # Empty signal set
-        repo_write = CSVRepository.create(file_path, expected_signals=set())
+        repo_write = CsvRepository.create(file_path)
         repo_write.save_frame(frame)
         repo_write.close()
         
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         frames = list(repo_read.get_frames(QueryFilter()))
         repo_read.close()
         
@@ -693,12 +705,12 @@ class TestCSVRepositoryEdgeCases:
         """Verify query that matches no frames."""
         file_path = os.path.join(temp_dir, 'no_match.csv')
         
-        repo_write = CSVRepository.create(file_path)
+        repo_write = CsvRepository.create(file_path)
         for frame in sample_frames:
             repo_write.save_frame(frame)
         repo_write.close()
         
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         query = QueryFilter(can_ids=[0x999])  # Doesn't exist
         frames = list(repo_read.get_frames(query))
         repo_read.close()
@@ -709,12 +721,12 @@ class TestCSVRepositoryEdgeCases:
         """Verify limit that's larger than available frames."""
         file_path = os.path.join(temp_dir, 'large_limit.csv')
         
-        repo_write = CSVRepository.create(file_path)
+        repo_write = CsvRepository.create(file_path)
         for frame in sample_frames:
             repo_write.save_frame(frame)
         repo_write.close()
         
-        repo_read = CSVRepository.open(file_path)
+        repo_read = CsvRepository.open(file_path)
         query = QueryFilter(limit=1000)  # Much larger than 5 frames
         frames = list(repo_read.get_frames(query))
         repo_read.close()

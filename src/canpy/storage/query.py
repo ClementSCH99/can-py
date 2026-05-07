@@ -12,19 +12,18 @@ class QueryFilter:
     
     This class can be extended with additional fields as needed (e.g., data payload filters).
     """
-    can_ids: Optional[List[int]] = None  # List of CAN IDs to filter by
-    start_time: Optional[float] = None  # Start time for filtering (timestamp)
-    end_time: Optional[float] = None  # End time for filtering (timestamp)
-    limit: Optional[int] = None  # Maximum number of frames to return
+    can_ids: Optional[List[int]] = None
+    time_start: Optional[float] = None
+    time_end: Optional[float] = None
+    limit: Optional[int] = None
 
     # TODO: Add more filter criteria as needed (e.g., data payload filters, signal value filters, etc.)
 
 
     def __post_init__(self):
-        # Validate that start_time and end_time are in correct order if both are provided
-        if self.start_time is not None and self.end_time is not None:
-            if self.start_time > self.end_time:
-                raise ValueError("start_time must be less than or equal to end_time")
+        if self.time_start is not None and self.time_end is not None:
+            if self.time_start > self.time_end:
+                raise ValueError("time_start must be less than or equal to time_end")
             
         if self.can_ids is not None:
             if not isinstance(self.can_ids, list):
@@ -49,8 +48,8 @@ class QueryFilter:
         """
         if self.can_ids is not None and frame.can_id not in self.can_ids:
             return False
-        if self.start_time is not None and frame.timestamp < self.start_time:
+        if self.time_start is not None and frame.timestamp < self.time_start:
             return False
-        if self.end_time is not None and frame.timestamp > self.end_time:
+        if self.time_end is not None and frame.timestamp > self.time_end:
             return False
         return True

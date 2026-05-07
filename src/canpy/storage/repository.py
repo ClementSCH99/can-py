@@ -42,6 +42,6 @@ class BaseRepository(ABC):
         """Convenience method to get frames by CAN ID."""
         return self.get_frames(QueryFilter(can_ids=[can_id]))
     
-    def get_by_time_range(self, start_time: float, end_time: float) -> Generator[CANFrame, None, None]:
+    def get_by_time_range(self, time_start: float, time_end: float) -> Generator[CANFrame, None, None]:
         """Convenience method to get frames within a time range."""
-        return self.get_frames(QueryFilter(start_time=start_time, end_time=end_time))
+        return self.get_frames(QueryFilter(time_start=time_start, time_end=time_end))

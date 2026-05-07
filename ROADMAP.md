@@ -1,7 +1,7 @@
 # 🗺️ CAN-PY: 3-Phase Implementation Roadmap
 
-**Last Updated**: Phase 1.2 Complete (April 16, 2026)  
-**Status**: ✅ Phase 1.2 Configuration Complete → Moving to Phase 1.3  
+**Last Updated**: Phase 1.3 Steps 1.3.2-1.3.3 Complete (May 7, 2026)  
+**Status**: ✅ QueryFilter + CsvRepository Complete → Moving to Phase 1.3.4  
 **Always Maintains**: 2-phase lookahead buffer
 
 ---
@@ -148,6 +148,8 @@ This is the critical enabler for Phase 2 visualization — you can't plot data y
 
 ##### Step 1.3.2 — Build Query Filter Object (REORDERED)
 
+**STATUS**: Completed May 7, 2026
+
 **REORDERING NOTE**: This step moved from 1.3.3 to 1.3.2 to respect dependency order (CsvRepository depends on QueryFilter).
 
 - 🎯 **Objective**: Create `canpy/storage/query.py` with a `QueryFilter` class that encapsulates filter parameters, so repository methods accept a single structured object instead of many keyword arguments.
@@ -164,7 +166,15 @@ This is the critical enabler for Phase 2 visualization — you can't plot data y
   - Validation in `__post_init__`: ensure `time_start < time_end` if both provided
   - Write tests for the filter object independently — it's pure logic, no I/O needed
 
+**Completed Deliverables**:
+- `src/canpy/storage/query.py` — `QueryFilter` value object with roadmap-aligned fields (`can_ids`, `time_start`, `time_end`, `limit`)
+- `src/canpy/storage/repository.py` — convenience time-range API aligned to `time_start` / `time_end`
+- `tests/storage/test_query.py` — unit tests updated to validate the roadmap contract and matching behavior
+- Query validation remains inside the filter object, so repositories can trust a valid filter instance
+
 ##### Step 1.3.3 — Implement CSV Repository (REORDERED)
+
+**STATUS**: Completed May 7, 2026
 
 **REORDERING NOTE**: This step moved from 1.3.2 to 1.3.3 to depend on QueryFilter (built in 1.3.2).
 
@@ -181,6 +191,7 @@ This is the critical enabler for Phase 2 visualization — you can't plot data y
 - ⚖️ **Tradeoffs**:
   - **Load-all vs. lazy streaming reads**: For large captures (millions of frames), use generator-based streaming. Generators work for small files with no performance penalty.
   - **In-memory index vs. scan-every-time**: Start without an index (linear scan). Optimize only if profiling shows it's needed (Phase 2).
+  - **Dynamic headers vs. memory usage**: Full in-memory buffering would preserve dynamic signal columns but scales poorly for large files. The implemented solution stages frames to a temporary file during writes, then emits the final CSV with the complete header on close. This keeps memory bounded without introducing a more complex header-rewrite system.
 - 📌 **Implementation guidance**:
   - Create `src/canpy/storage/csv_repository.py`
   - **Write path**: `save_frame(frame: CANFrame)`
@@ -199,6 +210,15 @@ This is the critical enabler for Phase 2 visualization — you can't plot data y
       - `parsed_signals`: Auto-detect (try float, else string)
   - **Lifecycle**: `open()` class method, `close()` method, context manager support (`__enter__`, `__exit__`)
   - **File path**: Store filepath for lazy reads (enables streaming from same file multiple times)
+
+**Completed Deliverables**:
+- `src/canpy/storage/csv_repository.py` — `CsvRepository` implementation with `create()`, `open()`, `save_frame()`, `get_frames()`, `count()`, and context manager support
+- CSV read path aligned to `CSVWriter` output format: `timestamp`, `can_id`, `dlc`, `data_hex`, plus dynamic signal columns
+- Disk-backed staging during writes preserves dynamic signal columns without unbounded RAM growth
+- `src/canpy/storage/__init__.py` and `src/canpy/__init__.py` — export `CsvRepository`, `BaseRepository`, and `QueryFilter` as promised by Step 1.3.4 guidance
+- `tests/storage/test_csv_repository.py` — lossless round-trip tests, filtering tests, edge-case tests, and CSVWriter → CsvRepository integration coverage
+- `tests/storage/test_public_exports.py` — verifies the public storage API is available from `canpy`
+- Validation result: storage and writer suites passing (`120` tests)
 
 ##### Step 1.3.4 — Integrate Repository into Capture Pipeline
 

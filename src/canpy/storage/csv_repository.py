@@ -1,22 +1,21 @@
-# src/storage/csv_repository.py
-
 import csv
+import json
+import os
+import tempfile
+from typing import Any, Generator, Optional, Set
 
 from .query import QueryFilter
 from .repository import BaseRepository
 from .frame import CANFrame
 
-from typing import Any, Generator, Optional, Set
-import os
-
-
-class CSVRepository(BaseRepository):
+class CsvRepository(BaseRepository):
     """
     CSV-based implementation of the BaseRepository.
     
     This class handles reading/writing CAN frames to a CSV file.
     It implements the abstract methods defined in BaseRepository.
     """
+    _BASE_FIELDNAMES = ['timestamp', 'can_id', 'dlc', 'data_hex']
     
     def __init__(self,
                  file_path: str,
@@ -26,13 +25,13 @@ class CSVRepository(BaseRepository):
         self._file = None
         self._mode = None
 
-        self._fieldnames = ['timestamp', 'can_id', 'dlc', 'data_hex']
-        if expected_signals:
-            self._fieldnames.extend([f"{sig}" for sig in sorted(expected_signals)])
+        self._signal_fieldnames = sorted(expected_signals) if expected_signals else []
+        self._fieldnames = [*self._BASE_FIELDNAMES, *self._signal_fieldnames]
         self._header_written = False
         self._frame_count = 0
+        self._staging_file = None
 
-    def __enter__(self) -> 'CSVRepository':
+    def __enter__(self) -> 'CsvRepository':
         """Enter context manager, open the file and return self."""
         return self
 
@@ -42,8 +41,8 @@ class CSVRepository(BaseRepository):
         return False
     
     @classmethod
-    def create(cls, file_path: str, expected_signals: Optional[Set[str]] = None) -> 'CSVRepository':
-        """Factory method to create a new CSVRepository instance."""
+    def create(cls, file_path: str, expected_signals: Optional[Set[str]] = None) -> 'CsvRepository':
+        """Factory method to create a new CsvRepository instance."""
         if os.path.dirname(file_path) and not os.path.exists(os.path.dirname(file_path)):
             raise FileNotFoundError(f"Directory {os.path.dirname(file_path)} does not exist. Please provide a valid directory.")
         
@@ -52,13 +51,14 @@ class CSVRepository(BaseRepository):
         
         instance = cls(file_path, expected_signals)
         instance._file = open(file_path, 'w', newline='', encoding='utf-8')
+        instance._staging_file = tempfile.TemporaryFile(mode='w+', encoding='utf-8')
         instance._mode = 'w'
 
         return instance
 
     @classmethod
-    def open(cls, file_path: str, expected_signals: Optional[Set[str]] = None) -> 'CSVRepository':
-        """Factory method to open an existing CSVRepository instance."""
+    def open(cls, file_path: str, expected_signals: Optional[Set[str]] = None) -> 'CsvRepository':
+        """Factory method to open an existing CsvRepository instance."""
         
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File {file_path} does not exist. Please provide a valid file path.")
@@ -66,16 +66,20 @@ class CSVRepository(BaseRepository):
         instance = cls(file_path, expected_signals)
         instance._file = open(file_path, 'r', newline='', encoding='utf-8')
         instance._mode = 'r'
-        instance._header_written = True  # Assume header is already present in existing file 
+        instance._header_written = True
 
-        if instance._file:
-            reader = csv.DictReader(instance._file)
-            if reader.fieldnames:
-                for field in instance._fieldnames:
-                    if field not in reader.fieldnames:
-                        raise ValueError(f"Expected field '{field}' not found in CSV header.")
-            else:
-                print("[INFO] CSV file is empty or missing header.")
+        reader = csv.DictReader(instance._file)
+        if reader.fieldnames:
+            missing_fields = [field for field in cls._BASE_FIELDNAMES if field not in reader.fieldnames]
+            if missing_fields:
+                raise ValueError(f"Missing required CSV fields: {', '.join(missing_fields)}")
+            instance._fieldnames = list(reader.fieldnames)
+            instance._signal_fieldnames = [
+                field for field in reader.fieldnames if field not in cls._BASE_FIELDNAMES
+            ]
+        else:
+            instance._fieldnames = list(cls._BASE_FIELDNAMES)
+            instance._signal_fieldnames = []
         return instance
     
     def get_frames(self, query_filter: Optional[QueryFilter] = None) -> Generator[CANFrame, None, None]:
@@ -100,13 +104,15 @@ class CSVRepository(BaseRepository):
                     if query_filter.limit and yielded_frames >= query_filter.limit:
                         break
             except Exception as e:
-                print(f"Error parsing row: {e}. Row content: {row}")
+                raise ValueError(f"Failed to parse CSV row: {row}") from e
     
     def save_frame(self, frame: CANFrame) -> None:
         """Save a CANFrame to the CSV file."""
         if self._file is None or self._mode != 'w':
             raise RuntimeError("File is not open for writing. Please use 'create' method to create a new repository for writing.")
-        self._write_frame(frame)
+        self._register_signal_fields(frame)
+        self._stage_frame(frame)
+        self._frame_count += 1
     
     def count(self) -> int:
         """Return the total number of frames in the repository."""
@@ -128,10 +134,15 @@ class CSVRepository(BaseRepository):
         """Close the CSV file handle."""
         if self._file:
             try:
+                if self._mode == 'w':
+                    self._flush_staged_frames()
                 self._file.close()
                 self._file = None
+                if self._staging_file:
+                    self._staging_file.close()
+                    self._staging_file = None
             except Exception as e:
-                print(f"Error closing file: {e}")
+                raise RuntimeError(f"Error closing repository file: {e}") from e
 
 
     def _frame_to_row(self, frame: CANFrame) -> dict[str, Any]:
@@ -143,15 +154,11 @@ class CSVRepository(BaseRepository):
             'data_hex': ' '.join(f"{b:02X}" for b in frame.data),
         }
 
-        # Only include signals that were declared in expected_signals
         if frame.parsed_signals:
             for sig_name, sig_value in frame.parsed_signals.items():
-                # Only write if signal is in fieldnames (was declared upfront)
-                # TODO: improve this by allowing dynamic discovery of new signals and updating fieldnames on the fly, but that requires rewriting the CSV header which is non-trivial with DictWriter.
                 if sig_name in self._fieldnames:
                     flat_row[sig_name] = str(sig_value)
 
-        # Fill in missing signals with empty strings
         for fieldname in self._fieldnames:
             if fieldname not in flat_row:
                 flat_row[fieldname] = ''
@@ -165,54 +172,72 @@ class CSVRepository(BaseRepository):
         dlc = int(row['dlc'])
         data = bytes.fromhex(row['data_hex'].replace(' ', ''))
         
-        # Extract signals, skipping base fields and None keys
         parsed_signals = {}
         for key, value in row.items():
-            # Skip base fields and None keys (from csv.DictReader with extra columns)
-            if key not in ['timestamp', 'can_id', 'dlc', 'data_hex'] and key is not None:
-                # Skip empty strings (missing values for optional signals)
+            if key not in self._BASE_FIELDNAMES and key is not None:
                 if value == '':
                     continue
-                # Try to convert to float, otherwise keep as string
                 try:
                     parsed_signals[key] = float(value)
                 except (ValueError, TypeError):
                     parsed_signals[key] = value
         
-        # Return empty dict if no signals (for cleaner round-trip behavior)
         return CANFrame(timestamp, can_id, dlc, data, parsed_signals if parsed_signals else {})
-    
-    def _discover_signals(self, frame: CANFrame) -> None:
-        """
-        Note: Dynamic signal discovery is not supported.
-        
-        All signals must be declared upfront via expected_signals parameter
-        in create() method. This ensures CSV header is stable and DictWriter
-        doesn't encounter unexpected columns.
-        
-        If a frame has signals not in expected_signals, they are silently
-        ignored to maintain CSV consistency.
-        """
-        # This method is kept for compatibility but does nothing.
-        # Dynamic signal discovery was problematic with DictWriter.
-        # TODO: In the future, consider implementing dynamic signal discovery with a more flexible CSV structure or by rewriting the CSV header when new signals are discovered, but that is non-trivial and may require a different approach than DictWriter.
-        pass
-    
-    def _writer_header(self) -> None:
-        """Write the CSV header if it hasn't been written yet."""
+
+    def _register_signal_fields(self, frame: CANFrame) -> None:
+        if not frame.parsed_signals:
+            return
+
+        combined_signals = set(self._signal_fieldnames)
+        combined_signals.update(frame.parsed_signals.keys())
+        self._signal_fieldnames = sorted(combined_signals)
+        self._fieldnames = [*self._BASE_FIELDNAMES, *self._signal_fieldnames]
+
+    def _stage_frame(self, frame: CANFrame) -> None:
+        if self._staging_file is None:
+            raise RuntimeError("Repository staging file is not initialized for writing.")
+
+        staging_record = {
+            'timestamp': frame.timestamp,
+            'can_id': frame.can_id,
+            'dlc': frame.dlc,
+            'data_hex': frame.data.hex(),
+            'parsed_signals': frame.parsed_signals or {},
+        }
+        self._staging_file.write(json.dumps(staging_record) + '\n')
+
+    def _flush_staged_frames(self) -> None:
         if self._header_written:
             return
-        
-        # Preconditon: self._file is open and self._mode is 'w'
-        writer = csv.DictWriter(self._file, fieldnames=self._fieldnames) 
+
+        if self._staging_file is None:
+            raise RuntimeError("Repository staging file is not initialized for writing.")
+
+        writer = csv.DictWriter(
+            self._file,
+            fieldnames=self._fieldnames,
+            restval='',
+            extrasaction='ignore',
+        )
         writer.writeheader()
+
+        self._staging_file.seek(0)
+        for line in self._staging_file:
+            if not line.strip():
+                continue
+
+            record = json.loads(line)
+            frame = CANFrame(
+                timestamp=float(record['timestamp']),
+                can_id=int(record['can_id']),
+                dlc=int(record['dlc']),
+                data=bytes.fromhex(record['data_hex']),
+                parsed_signals=record.get('parsed_signals') or {},
+            )
+            writer.writerow(self._frame_to_row(frame))
+
+        self._file.flush()
         self._header_written = True
 
-    def _write_frame(self, frame: CANFrame) -> None:
-        """Write a single CANFrame to the CSV file."""
-        self._writer_header()
-        
-        writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
-        row = self._frame_to_row(frame)
-        writer.writerow(row)
-        self._frame_count += 1
+
+CSVRepository = CsvRepository

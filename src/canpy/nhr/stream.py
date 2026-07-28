@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator, Mapping, Optional, Protocol
@@ -63,6 +64,17 @@ class NHRMeasurement:
         return max(0.0, (current - self.timestamp_utc).total_seconds())
 
 
+@dataclass(frozen=True)
+class NHRStreamStatistics:
+    """Timing and completeness evidence for one client-side stream."""
+
+    received_count: int
+    first_sample_delay_s: Optional[float]
+    observed_rate_hz: Optional[float]
+    dropped_count: int
+    error: Optional[str]
+
+
 def _create_client(base_url: str) -> _NHRClient:
     try:
         from nhr9300 import NHRServiceClient
@@ -102,8 +114,14 @@ class NHRMeasurementStream:
         self._client: Optional[_NHRClient] = None
         self._thread: Optional[threading.Thread] = None
         self._ready = threading.Event()
+        self._first_sample = threading.Event()
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._started_monotonic: Optional[float] = None
+        self._first_received_monotonic: Optional[float] = None
+        self._last_received_monotonic: Optional[float] = None
+        self._received_count = 0
+        self._dropped_count = 0
 
     @property
     def running(self) -> bool:
@@ -119,22 +137,47 @@ class NHRMeasurementStream:
         return self._samples.qsize()
 
     def start(self, timeout_s: float = 10.0) -> "NHRMeasurementStream":
+        """Connect and wait until the first valid measurement is available."""
         if self.running:
             return self
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
         self._stop.clear()
         self._ready.clear()
+        self._first_sample.clear()
+        while True:
+            try:
+                self._samples.get_nowait()
+            except queue.Empty:
+                break
         with self._lock:
             self._error = None
+            self._latest = None
+            self._started_monotonic = time.monotonic()
+            self._first_received_monotonic = None
+            self._last_received_monotonic = None
+            self._received_count = 0
+            self._dropped_count = 0
         self._thread = threading.Thread(
             target=self._run,
             name=f"nhr-stream-{self.instrument_id}",
             daemon=True,
         )
         self._thread.start()
-        if not self._ready.wait(timeout_s):
+        deadline = time.monotonic() + timeout_s
+        if not self._ready.wait(max(0.0, deadline - time.monotonic())):
             self.stop()
             raise NHRStreamError(
                 f"Timed out connecting to NHR service at {self.base_url}"
+            )
+        if self.error:
+            self.stop()
+            raise NHRStreamError(self.error)
+        if not self._first_sample.wait(max(0.0, deadline - time.monotonic())):
+            self.stop()
+            raise NHRStreamError(
+                f"Connected to NHR service at {self.base_url}, but no valid "
+                f"measurement arrived within {timeout_s:.1f} seconds"
             )
         if self.error:
             self.stop()
@@ -177,15 +220,47 @@ class NHRMeasurementStream:
             or measurement.age_seconds(now) > self.stale_after_s
         )
 
+    def statistics(self) -> NHRStreamStatistics:
+        with self._lock:
+            started = self._started_monotonic
+            first = self._first_received_monotonic
+            last = self._last_received_monotonic
+            count = self._received_count
+            dropped = self._dropped_count
+            error = self._error
+        span = None if first is None or last is None else last - first
+        return NHRStreamStatistics(
+            received_count=count,
+            first_sample_delay_s=(
+                None if started is None or first is None else first - started
+            ),
+            observed_rate_hz=(
+                (count - 1) / span
+                if span is not None and span > 0 and count >= 2
+                else None
+            ),
+            dropped_count=dropped,
+            error=error,
+        )
+
     def _publish(self, measurement: NHRMeasurement) -> None:
+        received_at = time.monotonic()
+        with self._lock:
+            if self._first_received_monotonic is None:
+                self._first_received_monotonic = received_at
+            self._last_received_monotonic = received_at
+            self._received_count += 1
         try:
             self._samples.put_nowait(measurement)
         except queue.Full:
+            with self._lock:
+                self._dropped_count += 1
             try:
                 self._samples.get_nowait()
             except queue.Empty:
                 pass
             self._samples.put_nowait(measurement)
+        self._first_sample.set()
 
     def _run(self) -> None:
         connected = False
@@ -203,9 +278,17 @@ class NHRMeasurementStream:
                 self._error = f"NHR stream failed: {exc}"
             self._ready.set()
         finally:
+            with self._lock:
+                if (
+                    not self._stop.is_set()
+                    and self._received_count == 0
+                    and self._error is None
+                ):
+                    self._error = "NHR stream ended before its first measurement"
             if connected and not self._stop.is_set() and self._client is not None:
                 try:
                     self._client.disconnect(self.instrument_id)
                 except Exception:
                     pass
             self._ready.set()
+            self._first_sample.set()

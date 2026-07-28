@@ -3,6 +3,7 @@ from __future__ import annotations
 import can
 
 from canpy.capture import CANCapture
+from canpy.nhr import NHRMeasurement, NHRStreamStatistics
 
 
 class OneMessageBus:
@@ -32,15 +33,38 @@ class RecordingNHRStream:
     def __init__(self) -> None:
         self.started = False
         self.stopped = False
+        self.start_timeout = None
 
-    def start(self) -> None:
+    def start(self, timeout_s: float) -> None:
         self.started = True
+        self.start_timeout = timeout_s
 
     def stop(self) -> None:
         self.stopped = True
 
     def latest(self):
-        return None
+        return NHRMeasurement.from_mapping(
+            {
+                "instrument_id": self.instrument_id,
+                "timestamp_utc": "2026-07-28T17:25:42+00:00",
+                "voltage_v": 90.0,
+                "current_a": 0.04,
+                "power_w": 3.6,
+                "temperature_c": 24.0,
+            }
+        )
+
+    def statistics(self):
+        return NHRStreamStatistics(
+            received_count=1,
+            first_sample_delay_s=0.1,
+            observed_rate_hz=None,
+            dropped_count=0,
+            error=None,
+        )
+
+    def is_stale(self):
+        return False
 
 
 def test_capture_owns_nhr_stream_lifecycle() -> None:
@@ -52,5 +76,6 @@ def test_capture_owns_nhr_stream_lifecycle() -> None:
     assert capture.capture(count=1) is True
 
     assert nhr_stream.started is True
+    assert nhr_stream.start_timeout == 10.0
     assert nhr_stream.stopped is True
     assert bus.was_shutdown is True

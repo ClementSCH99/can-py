@@ -42,6 +42,7 @@ class CANCapture:
         log_formats=None,
         filter_can_ids=None,
         nhr_stream=None,
+        nhr_ready_timeout_s=10.0,
     ):
         """
         Initialize CAN capture
@@ -53,6 +54,7 @@ class CANCapture:
             log_formats: List of formats for streaming ('csv', 'json'), None for console-only
             filter_can_ids: List of CAN IDs to filter by (optional)
             nhr_stream: Optional read-only NHR measurement stream
+            nhr_ready_timeout_s: Maximum wait for the first NHR measurement
         """
         self.dbc_file = dbc_file
         self.bitrate = bitrate
@@ -66,6 +68,7 @@ class CANCapture:
         self.output_dir: Optional[str] = 'data'
         self.filter_can_ids = filter_can_ids or []  # List of CAN IDs to filter by
         self.nhr_stream = nhr_stream
+        self.nhr_ready_timeout_s = nhr_ready_timeout_s
         self._last_nhr_status_time = 0.0
     
     def connect(self) -> bool:
@@ -169,10 +172,19 @@ class CANCapture:
 
         if self.nhr_stream is not None:
             try:
-                self.nhr_stream.start()
                 print(
-                    f"[OK] Connected to read-only NHR stream "
-                    f"({self.nhr_stream.instrument_id})"
+                    f"[INFO] Waiting for first NHR measurement "
+                    f"({self.nhr_stream.instrument_id})..."
+                )
+                self.nhr_stream.start(timeout_s=self.nhr_ready_timeout_s)
+                measurement = self.nhr_stream.latest()
+                statistics = self.nhr_stream.statistics()
+                print(
+                    f"[OK] NHR stream ready after "
+                    f"{statistics.first_sample_delay_s:.2f}s | "
+                    f"{measurement.voltage_v:.3f} V | "
+                    f"{measurement.current_a:.3f} A | "
+                    f"{measurement.power_w:.3f} W"
                 )
             except NHRStreamError as exc:
                 print(f"[ERROR] Could not start NHR observation: {exc}")
@@ -293,6 +305,7 @@ class CANCapture:
                     writer.stop_streaming()
             if self.nhr_stream is not None:
                 self.nhr_stream.stop()
+                self._print_nhr_summary()
             self.disconnect()
         
         print(f"\n{'=' * 80}")
@@ -331,7 +344,40 @@ class CANCapture:
             f"{measurement.current_a:.3f} A | "
             f"{measurement.power_w:.3f} W | "
             f"{temperature} | {freshness}"
+            + (
+                f" | ERROR: {self.nhr_stream.error}"
+                if self.nhr_stream.error
+                else ""
+            )
         )
+
+    def _print_nhr_summary(self) -> None:
+        """Report NHR stream completeness without discarding the CAN capture."""
+        statistics = self.nhr_stream.statistics()
+        rate = (
+            "n/a"
+            if statistics.observed_rate_hz is None
+            else f"{statistics.observed_rate_hz:.2f} Hz"
+        )
+        first_delay = (
+            "n/a"
+            if statistics.first_sample_delay_s is None
+            else f"{statistics.first_sample_delay_s:.2f} s"
+        )
+        stale = self.nhr_stream.is_stale()
+        print("\nNHR stream summary:")
+        print(f"  Samples received: {statistics.received_count}")
+        print(f"  First sample delay: {first_delay}")
+        print(f"  Observed rate: {rate}")
+        print(f"  Local queue drops: {statistics.dropped_count}")
+        print(f"  Final sample stale: {'yes' if stale else 'no'}")
+        if statistics.error:
+            print(
+                f"[WARNING] CAN capture was preserved, but the NHR stream "
+                f"was incomplete: {statistics.error}"
+            )
+        else:
+            print("  Stream error: none")
     
     def _print_frame(self, frame_data, frame_num) -> None:
         """Print frame to console"""
@@ -435,11 +481,18 @@ USAGE:
         '--nhr-instrument', default=None,
         help='NHR instrument ID configured in nhr-rt (requires --nhr-url)'
     )
+    parser.add_argument(
+        '--nhr-ready-timeout', type=float, default=10.0,
+        help='Seconds to wait for the first valid NHR measurement (default: 10)'
+    )
     
     args = parser.parse_args()
 
     if bool(args.nhr_url) != bool(args.nhr_instrument):
         print("[ERROR] --nhr-url and --nhr-instrument must be supplied together")
+        return 1
+    if args.nhr_ready_timeout <= 0:
+        print("[ERROR] --nhr-ready-timeout must be positive")
         return 1
     
     # Validate DBC file if provided
@@ -490,6 +543,7 @@ USAGE:
         log_formats=log_formats,
         filter_can_ids=filter_can_ids,
         nhr_stream=nhr_stream,
+        nhr_ready_timeout_s=args.nhr_ready_timeout,
     )
     
     # Set output directory

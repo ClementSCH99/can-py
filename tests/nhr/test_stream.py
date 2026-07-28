@@ -98,6 +98,10 @@ def test_stream_keeps_a_bounded_backlog_and_newest_sample() -> None:
 
     assert stream.buffered_sample_count == 2
     assert stream.latest().voltage_v == 352.0
+    statistics = stream.statistics()
+    assert statistics.received_count == 3
+    assert statistics.first_sample_delay_s is not None
+    assert statistics.dropped_count == 1
     assert client.connected is True
     assert client.disconnected is True
 
@@ -128,6 +132,17 @@ def test_connection_failure_is_actionable() -> None:
 
     with pytest.raises(NHRStreamError, match="service unavailable"):
         stream.start()
+
+
+def test_start_requires_a_first_measurement() -> None:
+    client = FiniteClient([])
+    stream = NHRMeasurementStream(
+        "nhr-79503",
+        client_factory=lambda _: client,
+    )
+
+    with pytest.raises(NHRStreamError, match="before its first measurement"):
+        stream.start(timeout_s=0.2)
 
 
 def test_stale_state_uses_utc_timestamp() -> None:

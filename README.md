@@ -27,6 +27,21 @@ pip install -r requirements.txt
 
 ## Quick Start
 
+### Experimental NHR9300 observation
+
+The `exp/NHR9300` branch can consume the read-only measurement stream exposed
+by the separate `nhr-rt` service while CAN capture continues normally:
+
+```powershell
+python -m canpy.capture --duration 60 --log csv `
+  --nhr-url http://127.0.0.1:9300 `
+  --nhr-instrument nhr-79503
+```
+
+The NHR service remains responsible for IVI-COM, safety, and its own CSV. This
+integration does not expose commands, setpoints, arming, or routines. See
+[`NHR_MVP.md`](NHR_MVP.md) for setup and acceptance criteria.
+
 ### Basic Usage
 
 Capture 60 seconds of CAN data:

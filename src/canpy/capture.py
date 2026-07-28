@@ -28,12 +28,21 @@ from datetime import datetime
 import canpy.config as config
 from canpy import CANParser
 from canpy import WriterFactory
+from canpy.nhr import NHRMeasurementStream, NHRStreamError
 
 
 class CANCapture:
     """Capture and process CAN data"""
     
-    def __init__(self, dbc_file=None, bitrate=500000, serial_port=None, log_formats=None, filter_can_ids=None):
+    def __init__(
+        self,
+        dbc_file=None,
+        bitrate=500000,
+        serial_port=None,
+        log_formats=None,
+        filter_can_ids=None,
+        nhr_stream=None,
+    ):
         """
         Initialize CAN capture
         
@@ -43,6 +52,7 @@ class CANCapture:
             serial_port: Serial port for SLCAN device
             log_formats: List of formats for streaming ('csv', 'json'), None for console-only
             filter_can_ids: List of CAN IDs to filter by (optional)
+            nhr_stream: Optional read-only NHR measurement stream
         """
         self.dbc_file = dbc_file
         self.bitrate = bitrate
@@ -52,8 +62,11 @@ class CANCapture:
         self.frames = []  # Only used if not streaming
         self.log_formats = log_formats
         self.writer = None  # StreamingOutputWriter if log_formats is set
+        self.writers = {}
         self.output_dir: Optional[str] = 'data'
         self.filter_can_ids = filter_can_ids or []  # List of CAN IDs to filter by
+        self.nhr_stream = nhr_stream
+        self._last_nhr_status_time = 0.0
     
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
@@ -153,6 +166,18 @@ class CANCapture:
         if not self.bus:
             print("[ERROR] Not connected to CAN bus")
             return False
+
+        if self.nhr_stream is not None:
+            try:
+                self.nhr_stream.start()
+                print(
+                    f"[OK] Connected to read-only NHR stream "
+                    f"({self.nhr_stream.instrument_id})"
+                )
+            except NHRStreamError as exc:
+                print(f"[ERROR] Could not start NHR observation: {exc}")
+                self.disconnect()
+                return False
         
         # Initialize parser with DBC if provided
         if self.dbc_file:
@@ -163,7 +188,6 @@ class CANCapture:
             expected_signals = None
         
         # Initialize streaming writer if formats specified
-        self.writers = {}
         if self.log_formats:
             if self.output_dir is None:
                 self.output_dir = 'data'
@@ -214,6 +238,7 @@ class CANCapture:
                 # Read message
                 msg = self.bus.recv(timeout=1.0)
                 if msg is None:
+                    self._print_nhr_status()
                     continue
                 
                 # Parse frame
@@ -238,6 +263,7 @@ class CANCapture:
                 
                 # Display in console
                 self._print_frame(frame_data, frame_count)
+                self._print_nhr_status()
                 
                 # Print stats periodically for long captures
                 current_time = time.time()
@@ -261,10 +287,12 @@ class CANCapture:
             return False
         
         finally:
-            # Close streaming writers if active
+            # Close streaming writers and NHR stream if active
             if self.writers:
                 for writer in self.writers.values():
                     writer.stop_streaming()
+            if self.nhr_stream is not None:
+                self.nhr_stream.stop()
             self.disconnect()
         
         print(f"\n{'=' * 80}")
@@ -272,6 +300,38 @@ class CANCapture:
         print(f"{'=' * 80}\n")
         
         return True
+
+    def _print_nhr_status(self) -> None:
+        """Periodically show the newest read-only NHR measurement."""
+        if self.nhr_stream is None:
+            return
+        now = time.time()
+        if now - self._last_nhr_status_time < 5.0:
+            return
+        self._last_nhr_status_time = now
+
+        measurement = self.nhr_stream.latest()
+        if measurement is None:
+            detail = self.nhr_stream.error or "waiting for first measurement"
+            print(f"[NHR] {detail}")
+            return
+
+        freshness = (
+            f"STALE ({measurement.age_seconds():.1f}s old)"
+            if self.nhr_stream.is_stale()
+            else f"fresh ({measurement.age_seconds():.1f}s old)"
+        )
+        temperature = (
+            "n/a"
+            if measurement.temperature_c is None
+            else f"{measurement.temperature_c:.1f} C"
+        )
+        print(
+            f"[NHR] {measurement.voltage_v:.3f} V | "
+            f"{measurement.current_a:.3f} A | "
+            f"{measurement.power_w:.3f} W | "
+            f"{temperature} | {freshness}"
+        )
     
     def _print_frame(self, frame_data, frame_num) -> None:
         """Print frame to console"""
@@ -367,8 +427,20 @@ USAGE:
         '--filter-can-id', default=None,
         help='Filter by CAN ID(s): comma-separated hex values (e.g., 0x123,0x456 or 0x123)'
     )
+    parser.add_argument(
+        '--nhr-url', default=None,
+        help='Local nhr-rt service URL (requires --nhr-instrument)'
+    )
+    parser.add_argument(
+        '--nhr-instrument', default=None,
+        help='NHR instrument ID configured in nhr-rt (requires --nhr-url)'
+    )
     
     args = parser.parse_args()
+
+    if bool(args.nhr_url) != bool(args.nhr_instrument):
+        print("[ERROR] --nhr-url and --nhr-instrument must be supplied together")
+        return 1
     
     # Validate DBC file if provided
     if args.dbc and not Path(args.dbc).exists():
@@ -403,13 +475,21 @@ USAGE:
             print(f"  Use hex format (e.g., 0x123) or decimal (e.g., 291)")
             return 1
     
+    nhr_stream = None
+    if args.nhr_url and args.nhr_instrument:
+        nhr_stream = NHRMeasurementStream(
+            instrument_id=args.nhr_instrument,
+            base_url=args.nhr_url,
+        )
+
     # Create capturer
     capturer = CANCapture(
         dbc_file=args.dbc,
         bitrate=args.bitrate,
         serial_port=args.port,
         log_formats=log_formats,
-        filter_can_ids=filter_can_ids
+        filter_can_ids=filter_can_ids,
+        nhr_stream=nhr_stream,
     )
     
     # Set output directory

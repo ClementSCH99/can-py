@@ -70,6 +70,8 @@ class CANCapture:
         self.nhr_stream = nhr_stream
         self.nhr_ready_timeout_s = nhr_ready_timeout_s
         self._last_nhr_status_time = 0.0
+        self._recording_start_timestamp = None
+        self._discarded_pre_nhr_frames = 0
     
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
@@ -179,6 +181,11 @@ class CANCapture:
                 self.nhr_stream.start(timeout_s=self.nhr_ready_timeout_s)
                 measurement = self.nhr_stream.latest()
                 statistics = self.nhr_stream.statistics()
+
+                # This timestamp is the common start boundary for both recordings.
+                self._recording_start_timestamp = (
+                    measurement.timestamp_utc.timestamp()
+                )
                 print(
                     f"[OK] NHR stream ready after "
                     f"{statistics.first_sample_delay_s:.2f}s | "
@@ -251,6 +258,13 @@ class CANCapture:
                 msg = self.bus.recv(timeout=1.0)
                 if msg is None:
                     self._print_nhr_status()
+                    continue
+                if (
+                    self._recording_start_timestamp is not None
+                    and msg.timestamp < self._recording_start_timestamp
+                ):
+                    # The CAN adapter may have buffered frames while NHR started.
+                    self._discarded_pre_nhr_frames += 1
                     continue
                 
                 # Parse frame
@@ -370,7 +384,22 @@ class CANCapture:
         print(f"  First sample delay: {first_delay}")
         print(f"  Observed rate: {rate}")
         print(f"  Local queue drops: {statistics.dropped_count}")
+        print(f"  Reconnects: {statistics.reconnect_count}")
+        print(f"  Worker state: {statistics.state}")
         print(f"  Final sample stale: {'yes' if stale else 'no'}")
+        print(
+            f"  CAN frames discarded before NHR start: "
+            f"{self._discarded_pre_nhr_frames}"
+        )
+        if statistics.acquisition_csv_path:
+            print(f"  NHR CSV: {statistics.acquisition_csv_path}")
+        if statistics.acquisition_sample_count is not None:
+            print(
+                f"  NHR acquisition samples: "
+                f"{statistics.acquisition_sample_count}"
+            )
+        if statistics.transport_error:
+            print(f"  Last transport error: {statistics.transport_error}")
         if statistics.error:
             print(
                 f"[WARNING] CAN capture was preserved, but the NHR stream "
@@ -530,6 +559,7 @@ USAGE:
     
     nhr_stream = None
     if args.nhr_url and args.nhr_instrument:
+        logging.getLogger("canpy.nhr").setLevel(logging.INFO)
         nhr_stream = NHRMeasurementStream(
             instrument_id=args.nhr_instrument,
             base_url=args.nhr_url,

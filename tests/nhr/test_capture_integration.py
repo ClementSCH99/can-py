@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
+
 import can
 
 from canpy.capture import CANCapture
@@ -7,16 +10,23 @@ from canpy.nhr import NHRMeasurement, NHRStreamStatistics
 
 
 class OneMessageBus:
-    def __init__(self) -> None:
-        self.sent = False
+    def __init__(self, timestamps=None) -> None:
+        self.timestamps = None if timestamps is None else list(timestamps)
+        self.default_sent = False
         self.was_shutdown = False
 
     def recv(self, timeout: float):
-        if self.sent:
-            return None
-        self.sent = True
+        if self.timestamps is None:
+            if self.default_sent:
+                return None
+            self.default_sent = True
+            timestamp = time.time()
+        else:
+            if not self.timestamps:
+                return None
+            timestamp = self.timestamps.pop(0)
         return can.Message(
-            timestamp=1.0,
+            timestamp=timestamp,
             arbitration_id=0x123,
             data=[0x01, 0x02],
             is_extended_id=False,
@@ -30,14 +40,17 @@ class RecordingNHRStream:
     instrument_id = "nhr-79503"
     error = None
 
-    def __init__(self) -> None:
+    def __init__(self, events=None) -> None:
         self.started = False
         self.stopped = False
         self.start_timeout = None
+        self.events = events
 
     def start(self, timeout_s: float) -> None:
         self.started = True
         self.start_timeout = timeout_s
+        if self.events is not None:
+            self.events.append("nhr-first-sample")
 
     def stop(self) -> None:
         self.stopped = True
@@ -46,7 +59,7 @@ class RecordingNHRStream:
         return NHRMeasurement.from_mapping(
             {
                 "instrument_id": self.instrument_id,
-                "timestamp_utc": "2026-07-28T17:25:42+00:00",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "voltage_v": 90.0,
                 "current_a": 0.04,
                 "power_w": 3.6,
@@ -60,6 +73,12 @@ class RecordingNHRStream:
             first_sample_delay_s=0.1,
             observed_rate_hz=None,
             dropped_count=0,
+            reconnect_count=0,
+            state="streaming",
+            transport_error=None,
+            acquisition_error=None,
+            acquisition_csv_path="runs/nhr.csv",
+            acquisition_sample_count=1,
             error=None,
         )
 
@@ -79,3 +98,80 @@ def test_capture_owns_nhr_stream_lifecycle() -> None:
     assert nhr_stream.start_timeout == 10.0
     assert nhr_stream.stopped is True
     assert bus.was_shutdown is True
+
+
+def test_can_writer_starts_after_first_nhr_sample(monkeypatch, tmp_path) -> None:
+    events = []
+    nhr_stream = RecordingNHRStream(events)
+    bus = OneMessageBus()
+
+    class RecordingWriter:
+        def start_streaming(self):
+            events.append("can-writer-start")
+
+        def write_frame(self, frame):
+            pass
+
+        def stop_streaming(self):
+            pass
+
+        def get_stats(self):
+            return {"fps": 0.0, "elapsed_seconds": 0.0}
+
+    monkeypatch.setattr(
+        "canpy.capture.WriterFactory.create",
+        lambda *args, **kwargs: RecordingWriter(),
+    )
+    capture = CANCapture(log_formats=["csv"], nhr_stream=nhr_stream)
+    capture.output_dir = str(tmp_path)
+    capture.bus = bus
+
+    assert capture.capture(count=1) is True
+    assert events.index("nhr-first-sample") < events.index("can-writer-start")
+
+
+def test_can_frames_older_than_first_nhr_sample_are_discarded(
+    monkeypatch,
+) -> None:
+    first_nhr_timestamp = time.time()
+    old_timestamp = first_nhr_timestamp - 1.0
+    new_timestamp = first_nhr_timestamp + 0.1
+    written_timestamps = []
+
+    class FixedNHRStream(RecordingNHRStream):
+        def latest(self):
+            return NHRMeasurement.from_mapping(
+                {
+                    "instrument_id": self.instrument_id,
+                    "timestamp_utc": datetime.fromtimestamp(
+                        first_nhr_timestamp, timezone.utc
+                    ).isoformat(),
+                    "voltage_v": 90.0,
+                    "current_a": 0.04,
+                    "power_w": 3.6,
+                }
+            )
+
+    class RecordingWriter:
+        def start_streaming(self):
+            pass
+
+        def write_frame(self, frame):
+            written_timestamps.append(frame["timestamp"])
+
+        def stop_streaming(self):
+            pass
+
+        def get_stats(self):
+            return {"fps": 0.0, "elapsed_seconds": 0.0}
+
+    monkeypatch.setattr(
+        "canpy.capture.WriterFactory.create",
+        lambda *args, **kwargs: RecordingWriter(),
+    )
+    capture = CANCapture(log_formats=["csv"], nhr_stream=FixedNHRStream())
+    capture.bus = OneMessageBus([old_timestamp, new_timestamp])
+
+    assert capture.capture(count=1) is True
+    assert written_timestamps == [new_timestamp]
+    assert capture._discarded_pre_nhr_frames == 1

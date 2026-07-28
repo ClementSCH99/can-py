@@ -43,9 +43,11 @@ integration does not expose commands, setpoints, arming, or routines. See
 [`NHR_MVP.md`](NHR_MVP.md) for setup and acceptance criteria.
 
 The CAN capture timer starts after the first valid NHR measurement arrives.
+CAN frames buffered before that NHR timestamp are discarded.
 Use `--nhr-ready-timeout` if the physical IVI connection needs more than the
 default 10 seconds. A session summary reports the observed NHR sample rate and
-any stream error.
+any stream error. The SSE worker stops cooperatively before `disconnect()` and
+reconnects after temporary transport losses.
 
 ### Basic Usage
 

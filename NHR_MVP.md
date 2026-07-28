@@ -10,6 +10,8 @@ cycler.
 - `can-py` connects through `NHRServiceClient`, never directly through IVI-COM.
 - Measurements are consumed in a dedicated background thread.
 - CAN capture starts only after the first valid NHR measurement is received.
+- Buffered CAN frames timestamped before that first NHR measurement are
+  discarded, so both recorded datasets share the same start boundary.
 - The in-memory backlog is bounded and retains the newest measurements.
 - Voltage, current, power, temperature and UTC timestamp are validated.
 - The latest measurement can be identified as stale.
@@ -59,7 +61,9 @@ connection predictably needs longer:
 
 The readiness period occurs before the CAN capture timer starts. A connection
 without a valid first measurement fails the requested NHR capture instead of
-silently producing a partial beginning.
+silently producing a partial beginning. The first NHR `timestamp_utc` becomes
+the recording boundary; any older CAN frame already buffered by the adapter is
+not written.
 
 `nhr-rt` remains responsible for its own NHR CSV. The experimental MVP only
 shows the newest NHR values and their freshness alongside the CAN session. At
@@ -69,3 +73,22 @@ prints a warning that the combined session is incomplete.
 The `nhr-rt` service reads its JSON configuration at process startup. Stop and
 restart it after changing `rate_hz`; editing the JSON does not reconfigure an
 already-running service.
+
+## SSE lifecycle and recovery
+
+The NHR reader runs only in its dedicated worker thread. Shutdown follows this
+order:
+
+1. set the worker `stop_event`;
+2. join the SSE reader thread;
+3. call `disconnect()` only after the reader has ended.
+
+The connection is never force-closed from the CAN thread. Unexpected EOF and
+temporary network errors trigger interruptible reconnect attempts with a
+bounded backoff. After an unexpected stream end, the worker queries
+`acquisition()` and distinguishes a transport interruption from a real
+`last_error` reported by `nhr-rt`.
+
+Only one worker may own a given service URL and instrument ID at a time. The
+worker exposes its state, last transport error, NHR acquisition error, CSV path
+and acquisition sample count in the final session summary.

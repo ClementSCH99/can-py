@@ -23,12 +23,13 @@ if sys.platform == 'win32':
 
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 import canpy.config as config
 from canpy import CANParser
 from canpy import WriterFactory
 from canpy.nhr import NHRMeasurementStream, NHRStreamError
+from canpy.writers import MergedCSVError, MergedCSVWriter, load_signal_file
 
 
 class CANCapture:
@@ -43,6 +44,8 @@ class CANCapture:
         filter_can_ids=None,
         nhr_stream=None,
         nhr_ready_timeout_s=10.0,
+        merged_signals=None,
+        merged_can_stale_after_s=2.0,
     ):
         """
         Initialize CAN capture
@@ -70,8 +73,11 @@ class CANCapture:
         self.nhr_stream = nhr_stream
         self.nhr_ready_timeout_s = nhr_ready_timeout_s
         self._last_nhr_status_time = 0.0
-        self._recording_start_timestamp = None
-        self._discarded_pre_nhr_frames = 0
+        self.merged_signals = set(merged_signals or [])
+        self.merged_can_stale_after_s = merged_can_stale_after_s
+        self._can_csv_path = None
+        self._merged_csv_path = None
+        self._merged_row_count = 0
     
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
@@ -172,6 +178,24 @@ class CANCapture:
             print("[ERROR] Not connected to CAN bus")
             return False
 
+        # Load and validate the DBC before starting either recording.
+        if self.dbc_file:
+            self.parser = CANParser(self.dbc_file)
+            expected_signals = self.parser.get_expected_signals()
+        else:
+            self.parser = CANParser(None)
+            expected_signals = None
+
+        if self.merged_signals:
+            missing_signals = sorted(self.merged_signals - set(expected_signals or []))
+            if missing_signals:
+                print(
+                    "[ERROR] Merged CAN signal(s) not found in DBC: "
+                    + ", ".join(missing_signals)
+                )
+                self.disconnect()
+                return False
+
         if self.nhr_stream is not None:
             try:
                 print(
@@ -182,10 +206,6 @@ class CANCapture:
                 measurement = self.nhr_stream.latest()
                 statistics = self.nhr_stream.statistics()
 
-                # This timestamp is the common start boundary for both recordings.
-                self._recording_start_timestamp = (
-                    measurement.timestamp_utc.timestamp()
-                )
                 print(
                     f"[OK] NHR stream ready after "
                     f"{statistics.first_sample_delay_s:.2f}s | "
@@ -197,14 +217,6 @@ class CANCapture:
                 print(f"[ERROR] Could not start NHR observation: {exc}")
                 self.disconnect()
                 return False
-        
-        # Initialize parser with DBC if provided
-        if self.dbc_file:
-            self.parser = CANParser(self.dbc_file)
-            expected_signals = self.parser.get_expected_signals()
-        else:
-            self.parser = CANParser(None)
-            expected_signals = None
         
         # Initialize streaming writer if formats specified
         if self.log_formats:
@@ -241,6 +253,7 @@ class CANCapture:
         start_time = time.time()
         frame_count = 0
         last_stats_time = start_time
+        merge_error = None
         
         try:
             while True:
@@ -256,19 +269,20 @@ class CANCapture:
                 
                 # Read message
                 msg = self.bus.recv(timeout=1.0)
+                received_at = time.time()
                 if msg is None:
                     self._print_nhr_status()
-                    continue
-                if (
-                    self._recording_start_timestamp is not None
-                    and msg.timestamp < self._recording_start_timestamp
-                ):
-                    # The CAN adapter may have buffered frames while NHR started.
-                    self._discarded_pre_nhr_frames += 1
                     continue
                 
                 # Parse frame
                 frame_data = self.parser.parse_frame(msg)
+                # Preserve the adapter clock while exposing an explicit UTC
+                # receive time shared with the local nhr-rt service.
+                frame_data["source_timestamp"] = msg.timestamp
+                frame_data["timestamp"] = received_at
+                frame_data["timestamp_utc"] = datetime.fromtimestamp(
+                    received_at, timezone.utc
+                ).isoformat()
                 
                 # Apply CAN ID filter
                 if not self._matches_filter(frame_data['can_id_dec']):
@@ -316,17 +330,63 @@ class CANCapture:
             # Close streaming writers and NHR stream if active
             if self.writers:
                 for writer in self.writers.values():
-                    writer.stop_streaming()
+                    paths = writer.stop_streaming() or {}
+                    if "csv" in paths:
+                        self._can_csv_path = paths["csv"]
             if self.nhr_stream is not None:
                 self.nhr_stream.stop()
                 self._print_nhr_summary()
+            if self.merged_signals:
+                try:
+                    self._write_merged_csv()
+                except MergedCSVError as exc:
+                    merge_error = str(exc)
+                    print(f"[ERROR] Merged CSV was not created: {exc}")
             self.disconnect()
         
         print(f"\n{'=' * 80}")
         print(f"Capture complete: {frame_count} frames captured")
         print(f"{'=' * 80}\n")
         
-        return True
+        return merge_error is None
+
+    def _write_merged_csv(self) -> None:
+        """Create the derived CSV only after both raw writers are closed."""
+        if not self._can_csv_path:
+            raise MergedCSVError("CAN CSV path is unavailable")
+        if self.nhr_stream is None:
+            raise MergedCSVError("NHR stream is unavailable")
+
+        statistics = self.nhr_stream.statistics()
+        if statistics.error:
+            raise MergedCSVError(
+                f"NHR acquisition is incomplete: {statistics.error}"
+            )
+        if statistics.transport_error:
+            raise MergedCSVError(
+                f"NHR stream ended with an unresolved transport error: "
+                f"{statistics.transport_error}"
+            )
+        if not statistics.acquisition_csv_path:
+            raise MergedCSVError("NHR CSV path is unavailable")
+
+        output_dir = self.output_dir or "data"
+        session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(
+            output_dir, f"merged_capture_{session_timestamp}.csv"
+        )
+        result = MergedCSVWriter(
+            stale_after_s=self.merged_can_stale_after_s
+        ).merge(
+            can_csv_path=self._can_csv_path,
+            nhr_csv_path=statistics.acquisition_csv_path,
+            output_path=output_path,
+            signals=sorted(self.merged_signals),
+        )
+        self._merged_csv_path = result.path
+        self._merged_row_count = result.row_count
+        print(f"[OK] Merged CSV saved: {result.path}")
+        print(f"  Merged rows: {result.row_count}")
 
     def _print_nhr_status(self) -> None:
         """Periodically show the newest read-only NHR measurement."""
@@ -387,10 +447,6 @@ class CANCapture:
         print(f"  Reconnects: {statistics.reconnect_count}")
         print(f"  Worker state: {statistics.state}")
         print(f"  Final sample stale: {'yes' if stale else 'no'}")
-        print(
-            f"  CAN frames discarded before NHR start: "
-            f"{self._discarded_pre_nhr_frames}"
-        )
         if statistics.acquisition_csv_path:
             print(f"  NHR CSV: {statistics.acquisition_csv_path}")
         if statistics.acquisition_sample_count is not None:
@@ -514,6 +570,22 @@ USAGE:
         '--nhr-ready-timeout', type=float, default=10.0,
         help='Seconds to wait for the first valid NHR measurement (default: 10)'
     )
+    parser.add_argument(
+        '--merged-csv', action='store_true',
+        help='Create a derived NHR + selected CAN signals CSV after capture'
+    )
+    parser.add_argument(
+        '--merged-signals', default=None,
+        help='Comma-separated DBC signals to include in the merged CSV'
+    )
+    parser.add_argument(
+        '--merged-signals-file', default=None,
+        help='Text file containing one merged DBC signal per line'
+    )
+    parser.add_argument(
+        '--merged-can-stale-after', type=float, default=2.0,
+        help='Seconds before a merged CAN signal is stale (default: 2.0)'
+    )
     
     args = parser.parse_args()
 
@@ -522,6 +594,9 @@ USAGE:
         return 1
     if args.nhr_ready_timeout <= 0:
         print("[ERROR] --nhr-ready-timeout must be positive")
+        return 1
+    if args.merged_can_stale_after <= 0:
+        print("[ERROR] --merged-can-stale-after must be positive")
         return 1
     
     # Validate DBC file if provided
@@ -539,6 +614,43 @@ USAGE:
             if fmt not in valid_formats:
                 print(f"[ERROR] Invalid log format '{fmt}'. Valid: csv, json, txt")
                 return 1
+
+    merged_signals = set()
+    if args.merged_signals:
+        merged_signals.update(
+            signal.strip()
+            for signal in args.merged_signals.split(",")
+            if signal.strip()
+        )
+    if args.merged_signals_file:
+        try:
+            merged_signals.update(load_signal_file(args.merged_signals_file))
+        except MergedCSVError as exc:
+            print(f"[ERROR] {exc}")
+            return 1
+
+    if args.merged_csv:
+        if not args.nhr_url:
+            print("[ERROR] --merged-csv requires --nhr-url and --nhr-instrument")
+            return 1
+        if not args.dbc:
+            print("[ERROR] --merged-csv requires --dbc")
+            return 1
+        if not log_formats or "csv" not in log_formats:
+            print("[ERROR] --merged-csv requires --log csv (or csv,json)")
+            return 1
+        if not merged_signals:
+            print(
+                "[ERROR] --merged-csv requires --merged-signals and/or "
+                "--merged-signals-file"
+            )
+            return 1
+    elif args.merged_signals or args.merged_signals_file:
+        print(
+            "[ERROR] --merged-signals and --merged-signals-file require "
+            "--merged-csv"
+        )
+        return 1
     
     # Parse CAN ID filter
     filter_can_ids = []
@@ -574,6 +686,8 @@ USAGE:
         filter_can_ids=filter_can_ids,
         nhr_stream=nhr_stream,
         nhr_ready_timeout_s=args.nhr_ready_timeout,
+        merged_signals=merged_signals if args.merged_csv else None,
+        merged_can_stale_after_s=args.merged_can_stale_after,
     )
     
     # Set output directory

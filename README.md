@@ -43,11 +43,31 @@ integration does not expose commands, setpoints, arming, or routines. See
 [`NHR_MVP.md`](NHR_MVP.md) for setup and acceptance criteria.
 
 The CAN capture timer starts after the first valid NHR measurement arrives.
-CAN frames buffered before that NHR timestamp are discarded.
+No CAN frame is discarded by comparing adapter and NHR clocks. The CAN CSV
+keeps the adapter clock in `source_timestamp` and records the host receive time
+as Unix `timestamp` and ISO-8601 `timestamp_utc`.
 Use `--nhr-ready-timeout` if the physical IVI connection needs more than the
 default 10 seconds. A session summary reports the observed NHR sample rate and
 any stream error. The SSE worker stops cooperatively before `disconnect()` and
 reconnects after temporary transport losses.
+
+### Derived NHR + CAN CSV
+
+Keep the raw CAN and NHR recordings as the source of truth, then create a
+derived CSV automatically when the capture ends:
+
+```powershell
+python -m canpy.capture --duration 60 --dbc dbc/vehicle.dbc --log csv `
+  --nhr-url http://127.0.0.1:9300 --nhr-instrument nhr-79503 `
+  --merged-csv --merged-signals PackVoltage,VehicleSpeed
+```
+
+For a reusable selection, pass `--merged-signals-file signals.txt`. The file
+contains one DBC signal per line; blank lines and `#` comments are ignored.
+Both selections are combined when supplied together. Each NHR sample produces
+one merged row with the latest earlier CAN value, its age, and a `fresh`,
+`stale`, or `missing` status. The default stale threshold is 2 seconds and can
+be changed with `--merged-can-stale-after`.
 
 ### Basic Usage
 
@@ -140,9 +160,12 @@ Files are saved to the `data` directory with timestamp:
 ### CSV Format
 
 ```
-timestamp,can_id,dlc,data_hex,signal_RPM,signal_Speed,...
-1712057096.123,0x123,8,12 34 56 78 9A BC DE F0,800.0,50.5,...
+timestamp,timestamp_utc,source_timestamp,can_id,dlc,data_hex,signal_RPM,...
+1712057096.123,2024-04-02T12:44:56.123000+00:00,42.125,0x123,8,12 34...,800.0,...
 ```
+
+`timestamp` and `timestamp_utc` represent the host UTC receive time.
+`source_timestamp` preserves the timestamp supplied by the CAN adapter.
 
 ### JSON Format
 

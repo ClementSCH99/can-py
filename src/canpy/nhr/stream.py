@@ -259,6 +259,9 @@ class NHRMeasurementStream:
         self._thread = None
 
         if self._ever_connected and self._client is not None:
+            # Capture the final CSV path/count while the service session still
+            # exists. disconnect() may remove the acquisition from active state.
+            self._inspect_acquisition()
             try:
                 self._client.disconnect(self.instrument_id)
             except Exception as exc:

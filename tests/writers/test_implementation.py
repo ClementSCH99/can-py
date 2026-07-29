@@ -1,5 +1,6 @@
 """Tests for CSVWriter and JSONWriter implementations"""
 
+import csv
 import pytest
 import tempfile
 
@@ -57,3 +58,25 @@ class TestWriterImplementations:
         formats = WriterFactory.list_formats()
         assert 'csv' in formats, "CSV format not registered"
         assert 'json' in formats, "JSON format not registered"
+
+    def test_csv_preserves_source_timestamp_and_host_utc(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = CSVWriter(output_dir=tmpdir)
+            paths = writer.start_streaming(filename="timestamps")
+            writer.write_frame(
+                {
+                    "timestamp": 1000.25,
+                    "timestamp_utc": "1970-01-01T00:16:40.250000+00:00",
+                    "source_timestamp": 12.5,
+                    "can_id": "0x123",
+                    "dlc": 1,
+                    "data_hex": "01",
+                }
+            )
+            writer.stop_streaming()
+
+            with open(paths["csv"], newline="", encoding="utf-8") as handle:
+                row = next(csv.DictReader(handle))
+            assert row["timestamp"] == "1000.25"
+            assert row["timestamp_utc"] == "1970-01-01T00:16:40.250000+00:00"
+            assert row["source_timestamp"] == "12.5"

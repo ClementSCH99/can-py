@@ -10,8 +10,8 @@ cycler.
 - `can-py` connects through `NHRServiceClient`, never directly through IVI-COM.
 - Measurements are consumed in a dedicated background thread.
 - CAN capture starts only after the first valid NHR measurement is received.
-- Buffered CAN frames timestamped before that first NHR measurement are
-  discarded, so both recorded datasets share the same start boundary.
+- CAN frames are not discarded using timestamps from incompatible clocks.
+- The CAN CSV preserves the adapter timestamp and adds the host UTC receive time.
 - The in-memory backlog is bounded and retains the newest measurements.
 - Voltage, current, power, temperature and UTC timestamp are validated.
 - The latest measurement can be identified as stale.
@@ -62,8 +62,8 @@ connection predictably needs longer:
 The readiness period occurs before the CAN capture timer starts. A connection
 without a valid first measurement fails the requested NHR capture instead of
 silently producing a partial beginning. The first NHR `timestamp_utc` becomes
-the recording boundary; any older CAN frame already buffered by the adapter is
-not written.
+the readiness signal for starting CAN capture. The merged CSV later restricts
+both sources to their overlapping host-UTC window.
 
 `nhr-rt` remains responsible for its own NHR CSV. The experimental MVP only
 shows the newest NHR values and their freshness alongside the CAN session. At

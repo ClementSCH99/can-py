@@ -23,6 +23,8 @@ class BaseOutputWriter(ABC):
         Args:
             frame: Parsed frame dictionary with keys:
                    'timestamp' (float): Unix timestamp
+                   'timestamp_utc' (str, optional): ISO-8601 host receive time
+                   'source_timestamp' (float, optional): Adapter timestamp
                    'can_id' (str): CAN ID in hex format (e.g., '0x100')
                    'dlc' (int): Data length code
                    'data_hex' (str): Raw CAN data in hex

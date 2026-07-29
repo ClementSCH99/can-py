@@ -116,6 +116,11 @@ def test_start_and_stop_follow_event_join_disconnect_order() -> None:
 
     assert stream.running is False
     assert stream.state == "stopped"
+    assert client.events.index("reader-exit") < client.events.index("acquisition")
+    assert client.events.index("acquisition") < client.events.index("disconnect")
+    statistics = stream.statistics()
+    assert statistics.acquisition_csv_path == "runs/nhr.csv"
+    assert statistics.acquisition_sample_count == 1
     assert client.events.index("reader-exit") < client.events.index("disconnect")
 
 

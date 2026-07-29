@@ -32,7 +32,14 @@ class CSVWriter(BaseOutputWriter):
         # Streaming file handles
         self._csv_file = None
         self._csv_writer = None
-        self._fieldnames = ['timestamp', 'can_id', 'dlc', 'data_hex']
+        self._fieldnames = [
+            'timestamp',
+            'timestamp_utc',
+            'source_timestamp',
+            'can_id',
+            'dlc',
+            'data_hex',
+        ]
         if expected_signals:
             self._fieldnames.extend([f"{sig}" for sig in sorted(expected_signals)])
         self._frame_count = 0
@@ -84,6 +91,8 @@ class CSVWriter(BaseOutputWriter):
 
         flat_row = {
             'timestamp': frame['timestamp'],
+            'timestamp_utc': frame.get('timestamp_utc', ''),
+            'source_timestamp': frame.get('source_timestamp', frame['timestamp']),
             'can_id': frame['can_id'],
             'dlc': frame['dlc'],
             'data_hex': frame['data_hex'],

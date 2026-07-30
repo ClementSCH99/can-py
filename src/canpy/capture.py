@@ -32,6 +32,11 @@ from canpy.nhr import NHRMeasurementStream, NHRStreamError
 from canpy.writers import MergedCSVError, MergedCSVWriter, load_signal_file
 
 
+CAN_NO_TRAFFIC_WARNING_S = 5.0
+CAN_STATUS_INTERVAL_S = 10.0
+CAN_NO_TRAFFIC_REPEAT_S = 30.0
+
+
 class CANCapture:
     """Capture and process CAN data"""
     
@@ -78,6 +83,11 @@ class CANCapture:
         self._can_csv_path = None
         self._merged_csv_path = None
         self._merged_row_count = 0
+        self._received_frame_count = 0
+        self._recorded_frame_count = 0
+        self._capture_started_at = None
+        self._last_can_status_time = None
+        self._last_no_traffic_warning_time = None
     
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
@@ -252,7 +262,11 @@ class CANCapture:
         
         start_time = time.time()
         frame_count = 0
-        last_stats_time = start_time
+        self._received_frame_count = 0
+        self._recorded_frame_count = 0
+        self._capture_started_at = start_time
+        self._last_can_status_time = start_time
+        self._last_no_traffic_warning_time = None
         merge_error = None
         
         try:
@@ -272,7 +286,16 @@ class CANCapture:
                 received_at = time.time()
                 if msg is None:
                     self._print_nhr_status()
+                    self._print_can_status(received_at)
                     continue
+
+                self._received_frame_count += 1
+                if self._received_frame_count == 1:
+                    delay_s = received_at - start_time
+                    if delay_s >= CAN_NO_TRAFFIC_WARNING_S:
+                        print(
+                            f"[OK] CAN traffic detected after {delay_s:.1f}s"
+                        )
                 
                 # Parse frame
                 frame_data = self.parser.parse_frame(msg)
@@ -286,9 +309,12 @@ class CANCapture:
                 
                 # Apply CAN ID filter
                 if not self._matches_filter(frame_data['can_id_dec']):
+                    self._print_nhr_status()
+                    self._print_can_status(received_at)
                     continue
                 
                 frame_count += 1
+                self._recorded_frame_count = frame_count
                 
                 # Stream to files if enabled
                 if self.writers:
@@ -304,18 +330,7 @@ class CANCapture:
                 # Display in console
                 self._print_frame(frame_data, frame_count)
                 self._print_nhr_status()
-                
-                # Print stats periodically for long captures
-                current_time = time.time()
-                if self.writers and (current_time - last_stats_time) > 10:
-                    # Design (Phase 1.1): All writers get the same frames at the same FPS.
-                    # Stats are identical across writers, so reporting first writer is sufficient.
-                    # Future Enhancement (Phase 2): Multi-writer aggregation if writers operate independently.
-                    stats = next(iter(self.writers.values())).get_stats()
-                    fps = stats['fps']
-                    elapsed = stats['elapsed_seconds']
-                    print(f"[INFO] {elapsed:.1f}s | {frame_count} frames | {fps:.1f} fps")
-                    last_stats_time = current_time
+                self._print_can_status(received_at)
         
         except KeyboardInterrupt:
             print(f"\n[OK] Capture stopped by user")
@@ -345,10 +360,71 @@ class CANCapture:
             self.disconnect()
         
         print(f"\n{'=' * 80}")
-        print(f"Capture complete: {frame_count} frames captured")
+        elapsed_s = max(time.time() - start_time, 0.0)
+        print("CAN capture summary:")
+        print(
+            f"  Frames received: {self._received_frame_count} "
+            f"({self._rate(self._received_frame_count, elapsed_s):.1f} fps)"
+        )
+        print(
+            f"  Frames recorded: {frame_count} "
+            f"({self._rate(frame_count, elapsed_s):.1f} fps)"
+        )
+        if self._received_frame_count == 0:
+            print(
+                "[WARNING] No CAN traffic was detected. "
+                "Check that the BMSM is powered."
+            )
+        elif frame_count == 0:
+            print(
+                "[WARNING] CAN traffic was received, but no frame matched "
+                "the active CAN ID filter."
+            )
         print(f"{'=' * 80}\n")
         
         return merge_error is None
+
+    @staticmethod
+    def _rate(frame_count: int, elapsed_s: float) -> float:
+        """Calculate a frame rate safely at capture startup."""
+        if elapsed_s <= 0:
+            return 0.0
+        return frame_count / elapsed_s
+
+    def _print_can_status(self, now: float) -> None:
+        """Report CAN activity even when no frame is being received."""
+        if self._capture_started_at is None or self._last_can_status_time is None:
+            return
+
+        elapsed_s = max(now - self._capture_started_at, 0.0)
+        if self._received_frame_count == 0 and (
+            elapsed_s >= CAN_NO_TRAFFIC_WARNING_S
+        ):
+            warning_due = (
+                self._last_no_traffic_warning_time is None
+                or now - self._last_no_traffic_warning_time
+                >= CAN_NO_TRAFFIC_REPEAT_S
+            )
+            if warning_due:
+                print(
+                    f"[WARNING] No CAN traffic detected for {elapsed_s:.1f}s. "
+                    "Check that the BMSM is powered."
+                )
+                self._last_no_traffic_warning_time = now
+
+        if now - self._last_can_status_time < CAN_STATUS_INTERVAL_S:
+            return
+
+        received_fps = self._rate(self._received_frame_count, elapsed_s)
+        recorded_fps = self._rate(self._recorded_frame_count, elapsed_s)
+        print(
+            f"[INFO] CAN {elapsed_s:.1f}s | "
+            f"received: {self._received_frame_count} "
+            f"({received_fps:.1f} fps) | "
+            f"recorded: {self._recorded_frame_count} "
+            f"({recorded_fps:.1f} fps)"
+        )
+        self._last_can_status_time = now
 
     def _write_merged_csv(self) -> None:
         """Create the derived CSV only after both raw writers are closed."""
@@ -552,7 +628,7 @@ USAGE:
     )
     parser.add_argument(
         '--no-console', action='store_true',
-        help='Disable console output'
+        help='Hide individual CAN frames; status and warnings remain visible'
     )
     parser.add_argument(
         '--filter-can-id', default=None,

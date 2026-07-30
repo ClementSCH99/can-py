@@ -129,7 +129,7 @@ optional arguments:
   --bitrate BITRATE        CAN bitrate in bps (default: 500000)
   --output-dir DIR         Output directory (default: data)
   --log FORMAT             Output formats: csv,json,txt (comma-separated)
-  --no-console             Disable console output
+  --no-console             Hide individual CAN frames; keep status and warnings
   -h, --help              Show help message
 ```
 

@@ -165,3 +165,33 @@ def test_can_frame_keeps_source_timestamp_and_adds_host_utc(monkeypatch) -> None
     assert datetime.fromisoformat(frame["timestamp_utc"]).timestamp() == pytest.approx(
         frame["timestamp"]
     )
+
+
+def test_can_status_reports_zero_traffic_even_without_console_frames(
+    capsys,
+) -> None:
+    capture = CANCapture()
+    capture._capture_started_at = 100.0
+    capture._last_can_status_time = 100.0
+
+    capture._print_can_status(110.0)
+
+    output = capsys.readouterr().out
+    assert "No CAN traffic detected for 10.0s" in output
+    assert "received: 0 (0.0 fps)" in output
+    assert "recorded: 0 (0.0 fps)" in output
+
+
+def test_can_status_distinguishes_received_and_recorded_frames(capsys) -> None:
+    capture = CANCapture()
+    capture._capture_started_at = 100.0
+    capture._last_can_status_time = 100.0
+    capture._received_frame_count = 12
+    capture._recorded_frame_count = 3
+
+    capture._print_can_status(110.0)
+
+    output = capsys.readouterr().out
+    assert "received: 12 (1.2 fps)" in output
+    assert "recorded: 3 (0.3 fps)" in output
+    assert "No CAN traffic" not in output

@@ -94,9 +94,9 @@ temp/
 *.tmp
 
 # =========================
-# Documentation build
+# Documentation build artifacts
 # =========================
-docs/
+docs/_build/
 
 # =========================
 # Misc

@@ -1,354 +1,473 @@
-# 🗺️ CAN-PY: 3-Phase Implementation Roadmap
+# CAN-PY Project Roadmap
 
-**Last Updated**: Phase 1.3 Complete, Phase 1.4 Ready (May 7, 2026)  
-**Status**: ✅ Phase 1.3 Complete → Next: Phase 1.4 Step 1.4.1  
-**Always Maintains**: 2-phase lookahead buffer
+**Last updated:** July 30, 2026
 
----
+**Current phase:** Phase 2 — Operational Recording Footprint
 
-## 📊 Project Vision
-
-Transform CAN-PY from a capture-only tool into a **scalable, extensible data acquisition and analysis platform** supporting:
-- **Multiple data formats** (CSV, JSON, Parquet, HDF5, database)
-- **Data visualization** (plots, dashboards, real-time monitoring)
-- **Test equipment integration** (hardware control, synchronized capture)
-- **Enterprise patterns** (plugins, configuration management, validation)
-
-**Core Principle**: Each phase builds the foundation for the next without rework.
+**Project status:** Foundation cycle closed; operational priorities now lead development
 
 ---
 
-## ✅ Completed Phases
+## Project vision
 
-### Phase 1.1 — Plugin Architecture & Writer Registry ✅
+CAN-PY is a practical CAN data acquisition tool for day-to-day EV test work and
+a learning project for developing stronger Python and software-design skills.
 
-**Completed**: April 14, 2026
+The project should:
 
-**Summary**:
-Built an extensible writer system using Factory + Registry + Decorator patterns, proving the Open/Closed Principle by adding an ExampleWriter with zero changes to `capture.py`.
+- capture CAN data reliably during real tests;
+- preserve enough timing and configuration context to trust a recording;
+- keep recording size manageable during long sessions;
+- show the operator what is happening while a test is running;
+- support read-only integration with test equipment such as `nhr-rt`;
+- make captured data easy to export, query, visualize, and analyze;
+- introduce architecture and development concepts progressively, when they
+  support a real need.
 
-**Completed Deliverables**:
-- `canpy/writers/registry.py` — WriterFactory with registration validation
-- `canpy/writers/csv_writer.py` — Single-responsibility CSVWriter
-- `canpy/writers/json_writer.py` — Single-responsibility JSONWriter
-- `canpy/writers/example_writer.py` — Extensibility proof (dummy writer)
-- `canpy/writers/base.py` — BaseOutputWriter abstract interface
-- `capture.py` refactored to use WriterFactory loop (one writer per format)
-- Test suite: 16/16 tests passing
-
-**Design Patterns Implemented**:
-- Factory Pattern (WriterFactory.create())
-- Registry Pattern (format_name → writer_class mapping)
-- Decorator Pattern (@WriterFactory.register())
-- Abstract Base Class Pattern (BaseOutputWriter)
-- Dependency Injection (factory loop in capture.py)
-
-**Key Learnings**:
-- SOLID Principles in practice — Open/Closed Principle is powerful for extensibility
-- Test organization matters: separate mechanism tests from integration tests
-- Professional Python packaging with `src/` layout enables clean imports
-- Decorator-based registration is elegant but requires understanding of class-level side effects
+Safety remains a boundary, not a later feature. CAN-PY may observe NHR
+measurements through `nhr-rt`, but it does not gain permission to arm equipment,
+change setpoints, start routines, or energize a test.
 
 ---
 
-### Phase 1.2 — Configuration Management Layer ✅
+## How this roadmap is organized
 
-**Completed**: April 16, 2026
+The roadmap always keeps:
 
-**Summary**:
-Built a centralized ConfigManager with a 4-level precedence chain (YAML defaults → user config file → environment variables → CLI args). Configuration is immutable after validation, preventing accidental runtime mutations.
+1. completed phases and their main learnings;
+2. one detailed current phase, implemented step by step;
+3. at least two future phases at a higher level.
 
-**Completed Deliverables**:
-- `canpy/config/manager.py` — ConfigManager with load/validate/lock lifecycle
-- `canpy/config/defaults.yaml` — Default settings (interface, bitrate, capture mode, output, DBC)
-- `capture.py` refactored to accept ConfigManager via dependency injection
-- Comprehensive validation: bitrate, capture mode, output directory, DBC file existence, output formats, CAN ID filters
-- Config immutability after `validate_config()` (prevents post-validation mutations)
-- Integration tests covering defaults, env overrides, args overrides, locking, and validation
+The current phase may be adjusted when field use reveals a more urgent need.
+Changing direction is not a failure: the decision and the deferred work must be
+recorded explicitly.
 
-**Design Patterns Implemented**:
-- Strategy Pattern (multiple config sources with consistent interface)
-- Layered Configuration (4-level precedence chain)
-- Immutable Object Pattern (lock after validation)
-- Dependency Injection (ConfigManager injected into CANCapture)
-
-**Key Learnings**:
-- Configuration precedence chains are critical — users expect CLI to override everything
-- Immutability after validation prevents entire classes of subtle bugs
-- Environment variable overrides are essential for CI/CD and deployment flexibility
-- Validation should give actionable warnings (e.g., "uncommon bitrate" vs. just rejecting)
-- Separating config loading from config validation makes testing much easier
+Implementation follows [docs/WORKFLOW.md](docs/WORKFLOW.md). Branch roles and
+promotion gates are defined in [docs/BRANCHING.md](docs/BRANCHING.md).
 
 ---
 
-### Phase 1.3 — Data Access Layer (Repository Pattern) ✅
+## Completed phases
 
-**Completed**: May 7, 2026
+### Phase 1 — Software foundation
 
-**Summary**:
-Established the first read-side data access layer around a canonical `CANFrame` model. Captured CSV data can now be reopened, queried lazily through `QueryFilter`, and consumed through a repository abstraction without changing the capture write loop.
+**Closed:** July 30, 2026
 
-**Completed Deliverables**:
-- `canpy/storage/frame.py` — immutable `CANFrame` value object
-- `canpy/storage/repository.py` — `BaseRepository` contract with convenience query helpers
-- `canpy/storage/query.py` — `QueryFilter` with construction-time validation
-- `canpy/storage/csv_repository.py` — CSV repository with lazy reads, context manager support, and explicit cleanup on open-time validation failures
-- `canpy/__init__.py` and `canpy/storage/__init__.py` — public repository exports
-- Integration coverage for `CSVWriter` → `CsvRepository` → `QueryFilter`
-- Validation result: full suite passing (`179` tests)
+**Reason for closing:** The planned foundation was already sufficient to build
+useful vertical features. Real test use exposed two more urgent problems:
+recording size and lack of live visibility.
 
-**Key Learnings**:
-- Query objects should reject invalid inputs at construction time, not during iteration
-- Resource cleanup should be explicit on error paths, even when the runtime may hide the issue temporarily
-- Adding the read-side repository without refactoring the write path kept the phase focused and low-risk
+#### Phase 1.1 — Extensible writer architecture
 
----
----
+Delivered:
 
-## 📝 Session Notes: May 7, 2026 (Phase 1.3 Closeout)
+- `BaseOutputWriter`;
+- writer factory, registry, and decorator-based registration;
+- separate CSV and NDJSON writers;
+- proof that a new writer can be added without modifying the capture loop.
 
-**Focus**: Close Phase 1.3, resolve audit findings, and prepare Phase 1.4.
+Learned:
 
-**Key Decisions Made**:
-1. `QueryFilter` now validates numeric time bounds during construction, so repositories can trust filter objects. ✅
-2. `CsvRepository.open()` now closes file handles explicitly if CSV header validation fails. ✅
-3. Phase 1.3 ends as a read-side integration phase; capture continues writing through writer plugins until Phase 1.5 reorganizes the application boundary. ✅
+- Factory, Registry, Decorator, and Dependency Injection patterns;
+- Open/Closed Principle;
+- package organization using a `src/` layout.
 
-**Validation Snapshot**:
-- `pytest tests -q` → `179 passed`
-- Storage path verified end to end: `CSVWriter` → `CsvRepository.open()` → `QueryFilter`
+#### Phase 1.2 — Configuration management
 
----
+Delivered on `dev`:
 
-## 🏗️ Current Phase (Next to Implement)
+- centralized `ConfigManager`;
+- YAML, user-file, environment, and CLI precedence;
+- validation and immutable configuration after startup;
+- integration coverage for configuration behavior.
 
-### Phase 1.4 — Validation & Error Handling
+Learned:
 
-#### Goals
-1. Catch invalid data early with actionable diagnostics instead of delayed runtime failures
-2. Define a consistent domain exception model across parser, config, storage, and capture layers
-3. Replace internal `print()`-based diagnostics with structured logging without breaking CLI usability
-4. Prepare the codebase for richer Phase 2 query and visualization workflows
+- configuration precedence;
+- validation at system boundaries;
+- dependency injection and immutable runtime settings.
 
-#### Why Now?
-- Phase 1.3 introduced more data boundaries: parser → `CANFrame`, CSV → repository, config → capture.
-- Current error handling still mixes raw `ValueError`, `print()`, and module-specific behavior.
-- Phase 2 will be much harder to debug if malformed data and context-free errors keep propagating.
+#### Phase 1.3 — Data access layer
 
-#### Steps
+Delivered on `dev`:
 
-##### Step 1.4.1 — Define Domain Exceptions and Logging Boundary
+- immutable `CANFrame`;
+- `BaseRepository`, `CsvRepository`, and `QueryFilter`;
+- lazy CSV reading and filtered queries;
+- end-to-end writer-to-repository tests.
 
-**STATUS**: Next
+Learned:
 
-- 🎯 **Objective**: Create `canpy/exceptions.py` with a small domain exception hierarchy and decide where lower layers raise typed errors versus where the CLI formats user-facing messages.
-- 🧠 **Concept to learn**: Error boundaries — lower layers should expose structured failures, while the application boundary decides how to present them.
-- ⚖️ **Tradeoffs**:
-  - **Custom exceptions vs. raw `ValueError`**: Custom types add maintenance cost but make error handling explicit and extensible.
-  - **Centralized logging policy vs. scattered prints**: A logging boundary requires discipline, but it avoids mixing user interaction with library behavior.
-- 📌 **Implementation guidance**:
-  - Start with a base `CanPyError` plus focused subclasses for config, parser, repository, and validation concerns
-  - Update only boundary-facing code paths first; do not refactor unrelated logic in this step
-  - Keep existing CLI behavior stable while moving lower layers away from direct printing
+- Repository and Query Object patterns;
+- lazy iteration;
+- explicit resource cleanup;
+- value objects and public package APIs.
 
-##### Step 1.4.2 — Introduce Validation Schemas for Boundary Data
+#### Experimental operational MVP completed in parallel
 
-- 🎯 **Objective**: Add `canpy/validation/schemas.py` and validate frame-shaped data at ingress and egress boundaries.
-- 🧠 **Concept to learn**: Schema validation — validate external data once at trust boundaries, not repeatedly throughout the system.
-- ⚖️ **Tradeoffs**:
-  - **Validate everywhere vs. validate at boundaries**: Boundary validation is cheaper and clearer; validating every internal hop adds noise and runtime overhead.
-  - **Strict rejection vs. permissive coercion**: Reject obviously broken data, but allow safe normalization where it improves usability.
-- 📌 **Implementation guidance**:
-  - Validate parser outputs before persistence and repository row conversion before returning `CANFrame`
-  - Keep the hot capture loop lean; avoid redundant validation on already-trusted objects
-  - Favor explicit field-level errors over generic "invalid frame" messages
+Delivered on `exp/NHR9300` and currently used from the `can-py-main` worktree:
 
-##### Step 1.4.3 — Improve Parser and Repository Diagnostics
+- opt-in, read-only `nhr-rt` measurement streaming;
+- capture start aligned to the first valid NHR measurement;
+- host UTC timestamps for CAN/NHR correlation;
+- cooperative worker shutdown and bounded reconnection;
+- post-capture CAN/NHR merged CSV for selected DBC signals;
+- missing-CAN and stream-health diagnostics.
 
-- 🎯 **Objective**: Enrich failures with file path, row, CAN ID, signal, and DBC context so errors are actionable.
-- 🧠 **Concept to learn**: Diagnostic design — good error messages reduce debugging time more than clever recovery logic.
-- ⚖️ **Tradeoffs**:
-  - **Fail-fast vs. skip-and-continue**: Fail-fast is simpler and safer for now; selective recovery can come later once the error model is stable.
-  - **Verbose context vs. noisy errors**: Include enough context to debug, but avoid dumping irrelevant internal state.
-- 📌 **Implementation guidance**:
-  - Repository errors should include file path and row-level context
-  - Parser and DBC failures should name the message or signal involved when possible
-  - Reuse the domain exception hierarchy instead of inventing one-off messages in each module
+This MVP is a field pilot, not yet a release on the Git `main` branch. Its
+proven behavior will later be ported into `dev` through focused integration
+work.
 
-##### Step 1.4.4 — Replace Internal Prints with Structured Logging
+#### Foundation work intentionally deferred
 
-- 🎯 **Objective**: Move non-user-facing diagnostics to `logging` with consistent levels and module loggers.
-- 🧠 **Concept to learn**: Observability — logs are for operators and developers, not for every library call site.
-- ⚖️ **Tradeoffs**:
-  - **CLI friendliness vs. structured logs**: Keep the CLI readable, but stop using `print()` inside reusable modules for internal state and warnings.
-  - **Rich logs vs. minimal setup**: Start simple with level-based logging; avoid building a custom logging framework.
-- 📌 **Implementation guidance**:
-  - The CLI remains responsible for final user-facing output
-  - Lower layers should log context and raise typed exceptions
-  - Replace prints incrementally, starting with config, capture, parser, and storage boundary messages
+The former Phase 1.4 and 1.5 are not abandoned. These concepts move to the
+stabilization phase, where they can be applied to the operational architecture:
 
-##### Step 1.4.5 — Add Validation and Error-Handling Tests
+- domain exceptions and validation schemas;
+- structured logging and actionable diagnostics;
+- separation of CLI, capture engine, storage, and display concerns;
+- one canonical frame model shared by parser, writers, and repositories;
+- removal of deprecated modules and clearer package exports.
 
-- 🎯 **Objective**: Add unit and integration tests that lock down exception translation, schema validation, and logging behavior.
-- 🧠 **Concept to learn**: Regression protection for boundaries — tests should assert structured behavior, not brittle console text snapshots.
-- ⚖️ **Tradeoffs**:
-  - **Console snapshot tests vs. behavior tests**: Behavior tests are more stable and more useful for refactors.
-  - **Broad integration tests vs. targeted slices**: Prefer targeted tests first, then add one or two boundary integrations where the risk is highest.
-- 📌 **Implementation guidance**:
-  - Focus first on config, parser, storage, and capture error paths that currently mix raw exceptions and prints
-  - Test invalid DLC, malformed CSV rows, missing DBC messages, and logging/exception handoff
-  - Keep the new test cases close to the touched modules to preserve fast feedback
+The complete previous roadmap is preserved in
+[docs/history/ROADMAP_FOUNDATION_2026-05-07.md](docs/history/ROADMAP_FOUNDATION_2026-05-07.md).
 
 ---
 
-## 🔮 Future Phases
+## Current phase
 
-### Phase 1.5 — Project Reorganization
-**High-level goals**:
-- Separate CLI concerns from business logic: `capture.py` → `cli/main.py` (entry point) + `capture/engine.py` (logic)
-- Reorganize into clear packages: `capture/`, `storage/`, `writers/`, `config/`, `validation/`, `cli/`
-- Clean up `capture.py` which currently has too many responsibilities (connection, parsing, filtering, writing, console output, statistics)
-- Establish clear `__init__.py` exports for each subpackage
-- Remove deprecated `streaming_writer.py` and legacy `config.py`
+### Phase 2 — Operational recording footprint
 
-**Additional refactoring** (discovered in Phase 1.3):
-- **Centralize CANFrame class**: Move from `canpy/storage/frame.py` to `canpy/core/frame.py` or `canpy/frame.py`
-  - Rationale: Phase 1.3 identified that CANFrame should be the canonical representation across all systems (parser, writers, repository, capture)
-  - Current issue: Writers (Phase 1.1) and Repository (Phase 1.3) both work with frame data, but writers use dict while repository uses CANFrame
-  - Solution: Move CANFrame to central location, update writers to accept CANFrame as input (like repository does)
-  - Benefit: Single source of truth, type safety, consistency
-  - Timing: Do in Phase 1.5 after Phase 1.3 complete (avoids refactoring working code mid-phase)
-  - Impact: Minimal breaking changes (writers will be more type-safe, cleaner)
+#### Outcome
 
-### Phase 2 — Data Exploration & Visualization
-**High-level goals**:
-- Extend repository-backed queries with aggregation and advanced filters
-- Add SQLite as the next storage backend and support import from CSV captures
-- Generate static and interactive visual outputs from queried data
-- Support DataFrame export for analysis workflows
+Long captures create one trustworthy, compact session instead of several large,
+redundant text files. CSV remains available as an export when a person or
+external tool needs it.
+
+#### Why this is first
+
+A representative run produced approximately 2.43 GB of NDJSON and 1.73 GB of
+CSV for the same CAN traffic. More than 4.1 GB was written because two verbose
+text representations duplicated the recording.
+
+Before building richer analysis or dashboards, CAN-PY needs an explicit answer
+to:
+
+- what is the source of truth for a session;
+- which timestamps and metadata must never be lost;
+- which files are raw, derived, or temporary;
+- how size, write speed, interruption recovery, and exportability are balanced.
 
 ---
 
-## 🎨 PHASE 2: Data Exploration & Visualization
+#### Step 2.1 — Define the recording contract and baseline
 
-### Overview
-Enable understanding of captured data through queries and visual representations.
+**Status:** Accepted and completed on August 3, 2026.
 
-### Steps (High-Level)
+**Objective**
 
-#### **2.1 — Query & Aggregation Engine**
-- Advanced filtering (CAN ID ranges, signal value ranges, time windows)
-- Grouping (mean/min/max/count by time bucket)
-- Statistics (per-signal over time windows)
+Describe the minimum information required for a trustworthy test session and
+measure the current CSV/NDJSON baseline on a small representative capture.
 
-#### **2.2 — SQLite Integration**
-- Schema design (messages, signals, captures metadata)
-- Migrations (handle schema evolution)
-- Bulk import from CSV into SQLite
-- Query optimization (indexing strategies)
+**Concept to learn**
 
-#### **2.3 — Visualization Writers**
-- PNG plots (matplotlib) — signal vs. time
-- HTML interactive (plotly) — hover, pan, zoom
-- Summary reports — signal stats, data quality
-- Real-time monitoring
+Requirements and acceptance criteria: choose what must be preserved before
+choosing a technology.
 
-#### **2.4 — Pandas Integration**
-- Export queries to DataFrame
-- Statistical analysis (correlation, drift)
-- Data quality checks (missing frames, duplicates)
+**Questions to answer**
 
----
+- Which CAN fields are mandatory?
+- How are `timestamp_utc` and `source_timestamp` preserved?
+- Is the DBC version or checksum part of the session metadata?
+- Which NHR file references belong in the session?
+- What file-size reduction is considered useful?
+- What must remain readable after an interrupted capture?
 
-## 🔧 PHASE 3: Test Equipment Integration (FUTURE)
+**Division of work**
 
-### Overview
-Connect to hardware and control test scenarios programmatically.
+- The learner defines the operational requirements and reviews the session
+  contract.
+- The LLM may prepare measurement scripts, fixtures, and a comparison table.
 
-### Steps (High-Level)
+**Done when**
 
-#### **3.1 — Hardware Abstraction Layer (HAL)**
-- Equipment interface (DAQ, power supply, oscilloscope)
-- Protocol support (SCPI, proprietary commands)
-- Error handling + timeouts
+- the recording contract is written in the roadmap or a focused design note;
+- a repeatable baseline records size, frame count, duration, and write rate;
+- no output format has been selected without evidence.
 
-#### **3.2 — Async I/O & Concurrency**
-- Async capture + equipment control simultaneously
-- Event coordination
-- Proper cancellation & cleanup
+**Working document**
 
-#### **3.3 — Test Scenario Framework**
-- DSL: "Ramp voltage 5V → 20V over 30 seconds, capture signals"
-- Validation rules + pass/fail
-- Sequential + parallel operations
-
-#### **3.4 — Database Schema Versioning**
-- Auto-migrate old captures to new schemas
-- Backward compatibility
+- [CAN recording contract](docs/RECORDING_CONTRACT.md) defines the accepted
+  raw-frame, metadata, derived-output, and interruption-recovery requirements.
+- The baseline tool replays identical frames through the existing CSV and
+  NDJSON writers.
+- The operational baseline used 100,000 frames covering 143.760 seconds from
+  the August 3 representative capture. Both outputs read back all 100,000
+  records; neither current format was selected as the canonical format.
 
 ---
 
-## 📈 Architecture Evolution
+#### Step 2.2 — Compare compact-format candidates
 
-```
-PHASE 1: Monolithic → Pluggable
-├── Writers register themselves (1.1 ✅)
-├── Config centralized in YAML (1.2 ✅)
-├── Repository abstracts storage (1.3 ✅)
-├── Validation schemas catch errors (1.4 ← NEXT)
-└── Clean package structure (1.5)
+**Objective**
 
-PHASE 2: Add Query & Visualization
-├── Queries work across CSV, SQLite, future formats
-├── Visualization writers generated from data
-├── No changes to Phase 1 architecture
-└── Just extends repository with query methods
+Run a focused spike comparing only the realistic candidates:
 
-PHASE 3: Add Hardware & Test Control
-├── Async event loop coordinates operations
-├── Equipment drivers load via HAL
-├── Test scenarios use repository for logging
-└── Schema migrations handle evolution
-```
+- compressed BLF for raw CAN frames;
+- Parquet for structured records;
+- compressed CSV as a low-complexity fallback.
 
----
+**Concept to learn**
 
-## 🎓 Key Architectural Principles
+Engineering tradeoffs and proof-of-concept work: a spike answers a decision and
+is not automatically production code.
 
-| Principle | Why It Matters | Demonstrated In |
-|-----------|---|---|
-| **Dependency Inversion** | Code changes at boundaries, not core | Factory, ConfigManager, Repository |
-| **Open/Closed** | Add features without modifying existing | Plugin system, writer registry |
-| **Separation of Concerns** | Each module has one reason to change | CLI ≠ Parser ≠ Storage ≠ Config |
-| **Configuration as Code** | Easy to test different scenarios | YAML + environment overrides |
-| **Lazy Evaluation** | Efficient for large datasets | Repository loads frames on demand |
-| **Immutability** | Prevents subtle runtime bugs | ConfigManager locks after validation |
+**Tradeoffs to evaluate**
 
----
+- file size;
+- sustained write throughput;
+- CPU and memory use;
+- preservation of both timestamp domains;
+- partial-file behavior after interruption;
+- dependency weight and Python compatibility;
+- ability to read selected data without loading the whole capture;
+- ease of exporting to CSV and merging with NHR data.
 
-## 📝 Session Updates
+**Division of work**
 
-**Session 1** ✅ — Phase 1.1 complete (April 14, 2026)
-- Built writer plugin architecture with Factory + Registry + Decorator patterns
-- 16/16 tests passing
-- Open/Closed Principle proven with ExampleWriter
+- The learner predicts and explains the tradeoffs, then reviews the results.
+- The LLM may write repetitive benchmark adapters and collect measurements.
 
-**Session 2** ✅ — Phase 1.2 complete (April 16, 2026)
-- Built ConfigManager with 4-level precedence (YAML → user file → env → CLI)
-- Immutable config after validation
-- capture.py refactored to use dependency-injected ConfigManager
-- Comprehensive integration tests (defaults, overrides, locking, validation)
+**Done when**
 
-**Session 3** ✅ — Phase 1.3 complete (May 7, 2026)
-- Built `CANFrame`, `BaseRepository`, `QueryFilter`, and `CsvRepository`
-- Added post-capture CSV read/query integration without refactoring the capture write loop
-- Closed audit gaps in `QueryFilter` validation and repository open-time cleanup
-- Full suite passing (`179/179`)
+- results are recorded in one concise decision section;
+- one canonical recording format is selected;
+- rejected formats and the reason for rejection are documented;
+- the choice preserves the accepted timestamp contract.
 
 ---
 
-## 🏁 Success Criteria
+#### Step 2.3 — Define the session layout
 
-**Phase 1 ✅**: New feature added without modifying core logic  
-**Phase 2 ✅**: Data visualized and queried  
-**Phase 3 ✅**: Hardware controlled and test scenario ran  
+**Objective**
+
+Define a small, explicit session structure around the selected format.
+
+**Concept to learn**
+
+Data provenance: raw data, metadata, and derived outputs have different roles.
+
+**Expected direction**
+
+A session should identify:
+
+- the canonical CAN recording;
+- the NHR acquisition file when NHR observation is enabled;
+- capture start/end times and clock meaning;
+- DBC identity;
+- active signal selection and CAN filters;
+- tool/configuration version;
+- derived files such as merged exports.
+
+This does not require a database or a general artifact framework. A directory
+and a small manifest are sufficient unless Step 2.2 proves otherwise.
+
+**Done when**
+
+- raw and derived outputs cannot be confused;
+- paths remain usable across the `can-py` and `nhr-rt` processes;
+- existing raw files are retained if a derived export fails.
+
+---
+
+#### Step 2.4 — Implement the compact writer MVP
+
+**Objective**
+
+Add the selected writer through the existing writer registry and make it usable
+for a normal CAN-only capture.
+
+**Concept to learn**
+
+Extending an architecture through an existing abstraction instead of bypassing
+it.
+
+**Constraints**
+
+- keep the capture loop simple;
+- avoid unbounded in-memory buffering;
+- avoid per-frame durability operations unless measurements justify them;
+- report the active file and meaningful write failures;
+- do not modify NHR control or safety behavior;
+- keep the current CSV path available during transition.
+
+**Division of work**
+
+- The learner implements or co-implements the core serialization decisions.
+- The LLM may add boilerplate registration, CLI/config wiring, fixtures, and
+  repetitive tests after the contract is understood.
+
+**Done when**
+
+- writer unit tests pass;
+- a CAN-only integration capture is readable;
+- the new output is materially smaller than the baseline;
+- stopping normally and with `Ctrl+C` closes the writer cleanly.
+
+---
+
+#### Step 2.5 — Add read and CSV-export compatibility
+
+**Objective**
+
+Read the compact recording through a clear application boundary and export a
+selected time range or signal set to CSV.
+
+**Concept to learn**
+
+Canonical storage versus interchange format.
+
+**Tradeoffs**
+
+- extend the current repository abstraction where it fits;
+- do not force a raw CAN format into a tabular abstraction if a small adapter is
+  clearer;
+- avoid rebuilding the future query engine during this step.
+
+**Done when**
+
+- a recorded session can be reopened and sampled;
+- CSV is generated on demand rather than always duplicated during capture;
+- timestamp and frame round-trip tests pass.
+
+---
+
+#### Step 2.6 — Validate the operational recording
+
+**Objective**
+
+Prove the new recording path on representative bench use before making it the
+default.
+
+**Concept to learn**
+
+Release gates and operational validation.
+
+**Minimum validation**
+
+- short known-data capture;
+- representative long capture;
+- normal stop and operator interruption;
+- readable output and correct metadata;
+- measured size reduction;
+- no regression in CAN-only behavior;
+- raw data retained when an export fails;
+- documented fallback to the existing CSV writer.
+
+**Phase exit**
+
+Phase 2 closes only after the user reviews the evidence and accepts the format
+as the new operational recording path.
+
+---
+
+## Next phase
+
+### Phase 3 — Live test visibility
+
+**Outcome**
+
+The operator can see selected CAN and NHR measurements, data freshness, capture
+health, and file growth while a test is running.
+
+**Planned sections**
+
+1. Define the operator view and selected-signal contract.
+2. Expose a thread-safe latest-state snapshot independent of file writing.
+3. Build a minimal terminal dashboard with a slow, stable refresh rate.
+4. Add freshness, missing-data, capture-rate, and disk-growth warnings.
+5. Validate visibility during a representative test.
+6. Decide from field use whether plots or a browser dashboard are justified.
+
+**Concepts to learn**
+
+- producer/consumer separation;
+- state snapshots;
+- refresh rate versus acquisition rate;
+- operator-focused observability;
+- separation of presentation and business logic.
+
+The first target is a useful terminal view, not a full web application.
+
+---
+
+## Following phase
+
+### Phase 4 — MVP integration, architecture, and stable release
+
+**Outcome**
+
+The proven operational features are integrated into `dev` through clear
+boundaries and promoted to Git `main` as a stable lab release.
+
+**Planned sections**
+
+1. Review the field evidence and freeze the accepted NHR behavior.
+2. Port NHR observation and merged-output behavior into `dev` in focused pieces.
+3. Separate CLI, capture engine, storage, NHR provider, and live-view concerns.
+4. Move to one canonical frame model.
+5. Introduce domain exceptions and boundary validation.
+6. Replace reusable-module prints with structured logging while keeping the CLI
+   readable.
+7. Remove deprecated modules and repair public exports/documentation.
+8. Run automated and representative bench validation.
+9. Promote `dev` to `main` under the gates in `docs/BRANCHING.md`.
+
+**Concepts retained from the former roadmap**
+
+- separation of concerns;
+- domain exception hierarchy;
+- schema validation at trust boundaries;
+- structured logging;
+- clean package organization;
+- dependency inversion;
+- release discipline.
+
+This phase ports behavior intentionally. It does not blindly merge
+`exp/NHR9300` into `dev`.
+
+---
+
+## Longer-term direction
+
+### Phase 5 — Data exploration and visualization
+
+- repository-backed filtering and aggregation;
+- DataFrame export;
+- static and interactive plots;
+- data-quality summaries;
+- SQLite only if real query volume justifies it.
+
+### Phase 6 — Test scenario and equipment integration
+
+- read-only equipment providers first;
+- explicit hardware abstraction boundaries;
+- cancellation and cleanup;
+- test-scenario definitions;
+- controlled operations only through separately reviewed safety stages.
+
+---
+
+## Release-level success criteria
+
+The next stable `main` release should:
+
+- create compact, trustworthy recording sessions;
+- provide useful live visibility;
+- preserve raw CAN and NHR source data;
+- correlate sources only through compatible UTC timestamps;
+- stop workers and writers cleanly;
+- keep NHR integration observation-only;
+- pass automated tests and representative bench validation;
+- have commands and configuration documented for another operator;
+- be reviewed and explicitly accepted before commit, push, or promotion.

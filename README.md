@@ -14,6 +14,12 @@ A Python tool to capture raw CAN data from a CANable Z pro+ device and save it t
 - 📈 **Real-time Console Display**: View frames as they're captured
 - ⚙️ **Configurable**: Bitrate, port, and output settings
 
+## Project Documentation
+
+- [ROADMAP.md](ROADMAP.md) — current phase, completed work, and future direction
+- [docs/WORKFLOW.md](docs/WORKFLOW.md) — guided learning and implementation workflow
+- [docs/BRANCHING.md](docs/BRANCHING.md) — branch roles and release gates
+
 ## Installation
 
 1. Install dependencies:

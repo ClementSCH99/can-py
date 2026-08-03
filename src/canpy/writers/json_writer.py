@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 from typing import Dict, Any, Optional, Set
 
+from canpy.storage import CANFrame
 from canpy.writers.base import BaseOutputWriter
 from canpy.writers.registry import WriterFactory
 
@@ -57,21 +58,31 @@ class JSONWriter(BaseOutputWriter):
         
         return self._filepaths
 
-    def write_frame(self, frame: Dict[str, Any]) -> None:
+    def write_frame(self, frame: CANFrame) -> None:
         """
         Write a single frame to all active streams.
         
         Args:
-            frame: Parsed frame dictionary
+            frame: Standardized CAN frame
         """
         self._frame_count += 1
         
         if self._json_file:
             self._write_json_frame(frame)
     
-    def _write_json_frame(self, frame: Dict[str, Any]):
+    def _write_json_frame(self, frame: CANFrame):
         """Write frame to JSON stream (newline-delimited)"""
-        json_frame = self._make_json_serializable(frame)
+        json_frame = self._make_json_serializable({
+            'timestamp_utc': frame.timestamp_utc.isoformat(),
+            'source_timestamp': frame.source_timestamp,
+            'can_id': frame.can_id,
+            'dlc': frame.dlc,
+            'data_hex': frame.data.hex(),
+            'is_extended': frame.is_extended,
+            'is_remote': frame.is_remote,
+            'is_error': frame.is_error,
+            'parsed_signals': frame.parsed_signals,
+        })
         self._json_file.write(json.dumps(json_frame) + '\n')
         self._json_file.flush()
     

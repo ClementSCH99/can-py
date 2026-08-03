@@ -56,8 +56,10 @@ class QueryFilter:
         """
         if self.can_ids is not None and frame.can_id not in self.can_ids:
             return False
-        if self.time_start is not None and frame.timestamp < self.time_start:
+
+        timestamp_utc = frame.timestamp_utc.timestamp()
+        if self.time_start is not None and timestamp_utc < self.time_start:
             return False
-        if self.time_end is not None and frame.timestamp > self.time_end:
+        if self.time_end is not None and timestamp_utc > self.time_end:
             return False
         return True

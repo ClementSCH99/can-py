@@ -5,9 +5,11 @@ Focus: Validation logic, not full capture loop behavior.
 """
 
 import pytest
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch, MagicMock
 from canpy.config.manager import ConfigManager
 from canpy.capture import CANCapture
+from canpy.storage import CANFrame
 
 # TODO: Refactor this whole testing file as AI went crazy on it and it's a mess.
 # I'm not sur its the right way of doing it. A bit lost here. Task for later as it works now.
@@ -34,15 +36,18 @@ class TestCaptureModeValidation:
     
     @staticmethod
     def mock_frame_data():
-        """Return a complete mock frame data dictionary"""
-        return {
-            'can_id_dec': 0x123,
-            'can_id': '0x123',
-            'dlc': 8,
-            'data_hex': '00 01 02 03 04 05 06 07',
-            'timestamp': 0.1,
-            'parsed': {}
-        }
+        """Return a complete standardized frame."""
+        return CANFrame(
+            timestamp_utc=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+            source_timestamp=0.1,
+            can_id=0x123,
+            dlc=8,
+            data=bytes(range(8)),
+            is_extended=False,
+            is_remote=False,
+            is_error=False,
+            parsed_signals={},
+        )
     
     # Duration mode tests
     

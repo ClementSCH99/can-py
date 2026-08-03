@@ -1,8 +1,9 @@
 """Example writer demonstrating extensibility"""
 
 from datetime import datetime
-from typing import Dict, Any, Optional, Set
+from typing import Any, Dict, Optional, Set
 
+from canpy.storage import CANFrame
 from canpy.writers.base import BaseOutputWriter
 from canpy.writers.registry import WriterFactory
 
@@ -32,7 +33,7 @@ class ExampleWriter(BaseOutputWriter):
         print(f"[ExampleWriter] Starting...")
         return {'example': 'example://memory'}  # Virtual "file"
     
-    def write_frame(self, frame: Dict[str, Any]) -> None:
+    def write_frame(self, frame: CANFrame) -> None:
         """Count frame but don't write"""
         self._frame_count += 1
     

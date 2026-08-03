@@ -3,6 +3,9 @@
 import pytest
 from canpy.storage.query import QueryFilter
 from canpy.storage.frame import CANFrame
+from .frame_factory import make_frame
+
+CANFrame = make_frame
 
 
 class TestQueryFilterConstruction:

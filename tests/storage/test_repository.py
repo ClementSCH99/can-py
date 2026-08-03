@@ -7,6 +7,7 @@ import pytest
 
 from canpy.storage.frame import CANFrame
 from canpy.storage.repository import BaseRepository
+from .frame_factory import make_frame
 
 
 class TestRepositoryInterfaceStructure:
@@ -104,7 +105,12 @@ class TestRepositoryImplementationRequirements:
                 pass
         
         repo = DummyRepo()
-        frame = CANFrame(timestamp=1.0, can_id=0x123, dlc=8, data=b'12345678')
+        frame = make_frame(
+            timestamp=1.0,
+            can_id=0x123,
+            dlc=8,
+            data=b'12345678',
+        )
         repo.save_frame(frame)
         
         assert len(repo.saved_frames) == 1
@@ -118,7 +124,12 @@ class TestRepositoryImplementationRequirements:
             
             def get_frames(self, query_filter) -> Generator[CANFrame, None, None]:
                 # Return a generator (using yield)
-                yield CANFrame(timestamp=1.0, can_id=0x123, dlc=8, data=b'12345678')
+                yield make_frame(
+                    timestamp=1.0,
+                    can_id=0x123,
+                    dlc=8,
+                    data=b'12345678',
+                )
             
             def count(self) -> int:
                 return 1

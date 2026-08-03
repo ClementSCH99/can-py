@@ -10,8 +10,10 @@ Key Learning:
 """
 
 import tempfile
+from datetime import datetime, timezone
 import pytest
 
+from canpy.storage import CANFrame
 from canpy.writers.registry import WriterFactory
 from canpy.writers.example_writer import ExampleWriter
 from canpy.writers.csv_writer import CSVWriter
@@ -88,13 +90,19 @@ class TestPhase4Extensibility:
             assert isinstance(paths, dict), "start_streaming() must return dict"
             
             # Write frames (like capture.py does in loop)
-            frame = {
-                'timestamp': 1234567890.123,
-                'can_id': 0x100,
-                'dlc': 8,
-                'data_hex': '0102030405060708',
-                'parsed': {'RPM': 5000, 'Speed': 120}
-            }
+            frame = CANFrame(
+                timestamp_utc=datetime(
+                    2009, 2, 13, 23, 31, 30, 123000, tzinfo=timezone.utc
+                ),
+                source_timestamp=1234567890.123,
+                can_id=0x100,
+                dlc=8,
+                data=bytes.fromhex('0102030405060708'),
+                is_extended=False,
+                is_remote=False,
+                is_error=False,
+                parsed_signals={'RPM': 5000, 'Speed': 120},
+            )
             
             for i in range(10):
                 writer.write_frame(frame)
@@ -144,13 +152,19 @@ class TestPhase4Extensibility:
             assert 'example' in writers
             
             # Simulate frame processing (capture.py's write loop)
-            frame = {
-                'timestamp': 1234567890.123,
-                'can_id': 0x100,
-                'dlc': 8,
-                'data_hex': 'AABBCCDD',
-                'parsed': {'RPM': 5000, 'Speed': 120}
-            }
+            frame = CANFrame(
+                timestamp_utc=datetime(
+                    2009, 2, 13, 23, 31, 30, 123000, tzinfo=timezone.utc
+                ),
+                source_timestamp=1234567890.123,
+                can_id=0x100,
+                dlc=4,
+                data=bytes.fromhex('AABBCCDD'),
+                is_extended=False,
+                is_remote=False,
+                is_error=False,
+                parsed_signals={'RPM': 5000, 'Speed': 120},
+            )
             
             for writer in writers.values():
                 writer.write_frame(frame)

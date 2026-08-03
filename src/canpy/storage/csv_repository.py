@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from typing import Any, Generator, Optional, Set
 
 from .query import QueryFilter
@@ -15,7 +16,17 @@ class CsvRepository(BaseRepository):
     This class handles reading/writing CAN frames to a CSV file.
     It implements the abstract methods defined in BaseRepository.
     """
-    _BASE_FIELDNAMES = ['timestamp', 'can_id', 'dlc', 'data_hex']
+    _BASE_FIELDNAMES = [
+        'timestamp_utc',
+        'source_timestamp',
+        'can_id',
+        'dlc',
+        'data_hex',
+        'is_extended',
+        'is_remote',
+        'is_error',
+    ]
+    _LEGACY_BASE_FIELDNAMES = ['timestamp', 'can_id', 'dlc', 'data_hex']
     
     def __init__(self,
                  file_path: str,
@@ -73,14 +84,28 @@ class CsvRepository(BaseRepository):
             if not reader.fieldnames:
                 raise ValueError("CSV file is missing header row. Please ensure the file has a valid header with required fields.")
 
-            missing_fields = [field for field in cls._BASE_FIELDNAMES if field not in reader.fieldnames]
+            required_fields = ['can_id', 'dlc', 'data_hex']
+            missing_fields = [
+                field for field in required_fields if field not in reader.fieldnames
+            ]
+            has_current_timestamps = (
+                'timestamp_utc' in reader.fieldnames
+                and 'source_timestamp' in reader.fieldnames
+            )
+            has_legacy_timestamp = 'timestamp' in reader.fieldnames
+            if not has_current_timestamps and not has_legacy_timestamp:
+                missing_fields.append('timestamp_utc/source_timestamp or timestamp')
             if missing_fields:
                 raise ValueError(f"Missing required CSV fields: {', '.join(missing_fields)}")
+
             instance._fieldnames = list(reader.fieldnames)
+            reserved_fields = set(cls._BASE_FIELDNAMES)
+            reserved_fields.update(cls._LEGACY_BASE_FIELDNAMES)
             instance._signal_fieldnames = [
-                field for field in reader.fieldnames if field not in cls._BASE_FIELDNAMES
+                field for field in reader.fieldnames if field not in reserved_fields
             ]
             return instance
+
         except Exception:
             if instance._file is not None:
                 try:
@@ -158,10 +183,14 @@ class CsvRepository(BaseRepository):
     def _frame_to_row(self, frame: CANFrame) -> dict[str, Any]:
         """Convert CANFrame to a dictionary row for CSV writing."""
         flat_row = {
-            'timestamp': str(frame.timestamp),
+            'timestamp_utc': frame.timestamp_utc.isoformat(),
+            'source_timestamp': str(frame.source_timestamp),
             'can_id': f"0x{frame.can_id:03X}",
             'dlc': str(frame.dlc),
             'data_hex': ' '.join(f"{b:02X}" for b in frame.data),
+            'is_extended': str(frame.is_extended),
+            'is_remote': str(frame.is_remote),
+            'is_error': str(frame.is_error),
         }
 
         if frame.parsed_signals:
@@ -177,14 +206,27 @@ class CsvRepository(BaseRepository):
     
     def _row_to_frame(self, row: dict[str, Any]) -> CANFrame:
         """Convert a CSV row dictionary back to a CANFrame."""
-        timestamp = float(row['timestamp'])
-        can_id = int(row['can_id'], 16)
+        legacy_timestamp = row.get('timestamp')
+        if row.get('timestamp_utc'):
+            timestamp_utc = datetime.fromisoformat(
+                row['timestamp_utc'].replace('Z', '+00:00')
+            ).astimezone(timezone.utc)
+        else:
+            timestamp_utc = datetime.fromtimestamp(
+                float(legacy_timestamp),
+                tz=timezone.utc,
+            )
+
+        source_timestamp_text = row.get('source_timestamp') or legacy_timestamp
+        can_id = int(row['can_id'], 0)
         dlc = int(row['dlc'])
         data = bytes.fromhex(row['data_hex'].replace(' ', ''))
-        
+
+        reserved_fields = set(self._BASE_FIELDNAMES)
+        reserved_fields.update(self._LEGACY_BASE_FIELDNAMES)
         parsed_signals = {}
         for key, value in row.items():
-            if key not in self._BASE_FIELDNAMES and key is not None:
+            if key not in reserved_fields and key is not None:
                 if value == '':
                     continue
                 try:
@@ -192,7 +234,29 @@ class CsvRepository(BaseRepository):
                 except (ValueError, TypeError):
                     parsed_signals[key] = value
         
-        return CANFrame(timestamp, can_id, dlc, data, parsed_signals if parsed_signals else {})
+        return CANFrame(
+            timestamp_utc=timestamp_utc,
+            source_timestamp=float(source_timestamp_text),
+            can_id=can_id,
+            dlc=dlc,
+            data=data,
+            is_extended=self._parse_bool(row.get('is_extended', 'False')),
+            is_remote=self._parse_bool(row.get('is_remote', 'False')),
+            is_error=self._parse_bool(row.get('is_error', 'False')),
+            parsed_signals=parsed_signals if parsed_signals else {},
+        )
+
+    @staticmethod
+    def _parse_bool(value: Any) -> bool:
+        """Parse the explicit boolean spellings used by CSV outputs."""
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in ('true', '1'):
+            return True
+        if normalized in ('false', '0', ''):
+            return False
+        raise ValueError(f"Invalid boolean value: {value}")
 
     def _register_signal_fields(self, frame: CANFrame) -> None:
         if not frame.parsed_signals:
@@ -208,10 +272,14 @@ class CsvRepository(BaseRepository):
             raise RuntimeError("Repository staging file is not initialized for writing.")
 
         staging_record = {
-            'timestamp': frame.timestamp,
+            'timestamp_utc': frame.timestamp_utc.isoformat(),
+            'source_timestamp': frame.source_timestamp,
             'can_id': frame.can_id,
             'dlc': frame.dlc,
             'data_hex': frame.data.hex(),
+            'is_extended': frame.is_extended,
+            'is_remote': frame.is_remote,
+            'is_error': frame.is_error,
             'parsed_signals': frame.parsed_signals or {},
         }
         self._staging_file.write(json.dumps(staging_record) + '\n')
@@ -238,10 +306,14 @@ class CsvRepository(BaseRepository):
 
             record = json.loads(line)
             frame = CANFrame(
-                timestamp=float(record['timestamp']),
+                timestamp_utc=datetime.fromisoformat(record['timestamp_utc']),
+                source_timestamp=float(record['source_timestamp']),
                 can_id=int(record['can_id']),
                 dlc=int(record['dlc']),
                 data=bytes.fromhex(record['data_hex']),
+                is_extended=bool(record['is_extended']),
+                is_remote=bool(record['is_remote']),
+                is_error=bool(record['is_error']),
                 parsed_signals=record.get('parsed_signals') or {},
             )
             writer.writerow(self._frame_to_row(frame))

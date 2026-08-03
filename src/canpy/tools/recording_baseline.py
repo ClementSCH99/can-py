@@ -6,14 +6,15 @@ import argparse
 import csv
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
+from canpy.storage import CANFrame
 from canpy.writers import CSVWriter, JSONWriter
 
 
-Frame = Dict[str, Any]
+Frame = CANFrame
 
 
 def make_synthetic_frames(frame_count: int) -> List[Frame]:
@@ -21,22 +22,25 @@ def make_synthetic_frames(frame_count: int) -> List[Frame]:
     frames = []
     for index in range(frame_count):
         value = index % 256
+        source_timestamp = 1_700_000_000.0 + index * 0.001
         frames.append(
-            {
-                "timestamp": 1_700_000_000.0 + index * 0.001,
-                "can_id": f"0x{0x100 + index % 32:03X}",
-                "can_id_dec": 0x100 + index % 32,
-                "dlc": 8,
-                "data_hex": " ".join(f"{(value + offset) % 256:02X}" for offset in range(8)),
-                "data_bytes": [(value + offset) % 256 for offset in range(8)],
-                "is_extended": False,
-                "is_remote": False,
-                "is_error": False,
-                "parsed": {
+            CANFrame(
+                timestamp_utc=datetime.fromtimestamp(
+                    source_timestamp,
+                    tz=timezone.utc,
+                ),
+                source_timestamp=source_timestamp,
+                can_id=0x100 + index % 32,
+                dlc=8,
+                data=bytes((value + offset) % 256 for offset in range(8)),
+                is_extended=False,
+                is_remote=False,
+                is_error=False,
+                parsed_signals={
                     "SyntheticCounter": index,
                     "SyntheticValue": value / 10.0,
                 },
-            }
+            )
         )
     return frames
 
@@ -54,7 +58,7 @@ def load_ndjson_frames(path: Path, limit: Optional[int] = None) -> List[Frame]:
                 raise ValueError(f"Invalid NDJSON at line {line_number}: {exc}") from exc
             if not isinstance(value, dict):
                 raise ValueError(f"NDJSON line {line_number} is not an object")
-            frames.append(value)
+            frames.append(frame_from_record(value, line_number))
             if limit is not None and len(frames) >= limit:
                 break
 
@@ -63,11 +67,58 @@ def load_ndjson_frames(path: Path, limit: Optional[int] = None) -> List[Frame]:
     return frames
 
 
+def frame_from_record(record: Dict[str, Any], line_number: int) -> CANFrame:
+    """Convert current or legacy NDJSON fields into the canonical frame model."""
+    timestamp_text = record.get("timestamp_utc")
+    source_timestamp = record.get("source_timestamp", record.get("timestamp"))
+    if source_timestamp is None:
+        raise ValueError(f"NDJSON line {line_number} has no source timestamp")
+
+    if timestamp_text:
+        timestamp_utc = datetime.fromisoformat(
+            str(timestamp_text).replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    else:
+        timestamp_utc = datetime.fromtimestamp(
+            float(source_timestamp),
+            tz=timezone.utc,
+        )
+
+    can_id_value = record.get("can_id_dec", record.get("can_id"))
+    if can_id_value is None:
+        raise ValueError(f"NDJSON line {line_number} has no CAN ID")
+    can_id = (
+        int(can_id_value, 0)
+        if isinstance(can_id_value, str)
+        else int(can_id_value)
+    )
+
+    data_hex = record.get("data_hex")
+    if data_hex is not None:
+        data = bytes.fromhex(str(data_hex))
+    elif record.get("data_bytes") is not None:
+        data = bytes(record["data_bytes"])
+    else:
+        raise ValueError(f"NDJSON line {line_number} has no CAN payload")
+
+    return CANFrame(
+        timestamp_utc=timestamp_utc,
+        source_timestamp=float(source_timestamp),
+        can_id=can_id,
+        dlc=int(record["dlc"]),
+        data=data,
+        is_extended=bool(record.get("is_extended", False)),
+        is_remote=bool(record.get("is_remote", False)),
+        is_error=bool(record.get("is_error", False)),
+        parsed_signals=record.get("parsed_signals", record.get("parsed")),
+    )
+
+
 def expected_signals(frames: Iterable[Frame]) -> Set[str]:
     """Collect parsed-signal columns used by the current CSV writer."""
     names: Set[str] = set()
     for frame in frames:
-        parsed = frame.get("parsed")
+        parsed = frame.parsed_signals
         if isinstance(parsed, dict):
             names.update(str(name) for name in parsed)
     return names
@@ -75,22 +126,7 @@ def expected_signals(frames: Iterable[Frame]) -> Set[str]:
 
 def frame_time_seconds(frame: Frame) -> float:
     """Return the best common timeline value available on a baseline frame."""
-    timestamp_utc = frame.get("timestamp_utc")
-    if timestamp_utc:
-        normalized = str(timestamp_utc).replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized).timestamp()
-
-    timestamp = frame.get("timestamp")
-    if timestamp is not None:
-        return float(timestamp)
-
-    source_timestamp = frame.get("source_timestamp")
-    if source_timestamp is not None:
-        return float(source_timestamp)
-
-    raise ValueError(
-        "A baseline frame needs timestamp_utc, timestamp, or source_timestamp"
-    )
+    return frame.timestamp_utc.timestamp()
 
 
 def capture_duration_seconds(frames: Sequence[Frame]) -> float:

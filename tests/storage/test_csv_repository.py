@@ -11,6 +11,11 @@ from canpy import BaseRepository, CsvRepository, QueryFilter
 from canpy.storage.csv_repository import CSVRepository
 from canpy.storage.frame import CANFrame
 from canpy.writers.csv_writer import CSVWriter
+from .frame_factory import make_frame
+
+# These tests focus on repository behavior; the CANFrame contract itself has
+# dedicated tests in test_frame.py.
+CANFrame = make_frame
 
 
 @pytest.fixture

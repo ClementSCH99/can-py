@@ -9,6 +9,9 @@ import pytest
 from canpy import CsvRepository, QueryFilter
 from canpy.storage.frame import CANFrame
 from canpy.writers.csv_writer import CSVWriter
+from .frame_factory import make_frame
+
+CANFrame = make_frame
 
 
 class TestWriterRepositoryIntegration:

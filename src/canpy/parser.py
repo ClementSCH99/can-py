@@ -1,6 +1,9 @@
 """CAN message parser with DBC support"""
 import cantools
 from typing import Optional, Dict, Any
+from datetime import datetime
+
+from canpy.storage.frame import CANFrame
 
 
 class CANParser:
@@ -35,7 +38,7 @@ class CANParser:
                 self.expected_signals = set()
 
     
-    def parse_frame(self, msg) -> Dict[str, Any]:
+    def parse_frame(self, msg, timestamp_utc: datetime) -> CANFrame:
         """
         Parse a CAN frame into structured data
         
@@ -43,27 +46,26 @@ class CANParser:
             msg: python-can Message object
             
         Returns:
-            Dictionary with frame data
+            CANFrame object
         """
-        frame_data = {
-            'timestamp': msg.timestamp,
-            'can_id': f"0x{msg.arbitration_id:03X}",
-            'can_id_dec': msg.arbitration_id,
-            'dlc': msg.dlc,
-            'data_hex': ' '.join(f"{b:02X}" for b in msg.data),
-            'data_bytes': list(msg.data),
-            'is_extended': msg.is_extended_id,
-            'is_remote': msg.is_remote_frame,
-            'is_error': msg.is_error_frame,
-        }
         
         # Add parsed signals if DBC is available
         if self.db:
-            frame_data['parsed'] = self._decode_signals(msg.arbitration_id, msg.data)
+            parsed_signals = self._decode_signals(msg.arbitration_id, msg.data)
         else:
-            frame_data['parsed'] = None
-            
-        return frame_data
+            parsed_signals = None
+
+        return CANFrame(
+            timestamp_utc=timestamp_utc,
+            source_timestamp=msg.timestamp,
+            can_id=msg.arbitration_id,
+            dlc=msg.dlc,
+            data=bytes(msg.data),
+            is_extended=msg.is_extended_id,
+            is_remote=msg.is_remote_frame,
+            is_error=msg.is_error_frame,
+            parsed_signals=parsed_signals,
+        )
     
     def _decode_signals(self, can_id: int, data: bytes) -> Optional[Dict[str, Any]]:
         """

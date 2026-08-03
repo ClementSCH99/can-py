@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 import os
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, Optional
+
+from canpy.storage import CANFrame
 
 class BaseOutputWriter(ABC):
     """Abstract base class for CAN data writers.
@@ -14,19 +16,15 @@ class BaseOutputWriter(ABC):
         os.makedirs(self.output_dir, exist_ok=True)
     
     @abstractmethod
-    def write_frame(self, frame: Dict[str, Any]) -> None:
+    def write_frame(self, frame: CANFrame) -> None:
         """Write a single CAN frame.
         
         Buffering is handled transparently by the implementation.
         Raises IOError if write fails.
         
         Args:
-            frame: Parsed frame dictionary with keys:
-                   'timestamp' (float): Unix timestamp
-                   'can_id' (str): CAN ID in hex format (e.g., '0x100')
-                   'dlc' (int): Data length code
-                   'data_hex' (str): Raw CAN data in hex
-                   'parsed' (dict, optional): Decoded signals from DBC
+            frame: Immutable CAN frame, including both timestamp domains,
+                   raw frame flags, payload bytes, and optional decoded signals.
         
         Returns:
             None. Side effect: writes frame to output stream/file.
@@ -77,5 +75,4 @@ class BaseOutputWriter(ABC):
             
             Example: {'frames': 1000, 'elapsed_seconds': 20.5, 'fps': 48.8, 'formats': ['csv']}
         """
-        pass
         pass

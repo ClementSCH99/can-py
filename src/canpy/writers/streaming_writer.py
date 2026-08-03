@@ -30,6 +30,7 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 
+from canpy.storage import CANFrame
 from canpy.writers.base import BaseOutputWriter
 
 
@@ -56,7 +57,16 @@ class StreamingOutputWriter(BaseOutputWriter):
         # Streaming file handles
         self._csv_file = None
         self._csv_writer = None
-        self._fieldnames = ['timestamp', 'can_id', 'dlc', 'data_hex']
+        self._fieldnames = [
+            'timestamp_utc',
+            'source_timestamp',
+            'can_id',
+            'dlc',
+            'data_hex',
+            'is_extended',
+            'is_remote',
+            'is_error',
+        ]
         if expected_signals:
             self._fieldnames.extend([f"{sig}" for sig in sorted(expected_signals)])
         self._json_file = None
@@ -98,12 +108,12 @@ class StreamingOutputWriter(BaseOutputWriter):
         
         return self._filepaths
 
-    def write_frame(self, frame: Dict[str, Any]) -> None:
+    def write_frame(self, frame: CANFrame) -> None:
         """
         Write a single frame to all active streams.
         
         Args:
-            frame: Parsed frame dictionary
+            frame: Standardized CAN frame
         """
         self._frame_count += 1
         
@@ -113,7 +123,7 @@ class StreamingOutputWriter(BaseOutputWriter):
         if self._csv_file:
             self._write_csv_frame(frame)
     
-    def _write_csv_frame(self, frame: Dict[str, Any]):
+    def _write_csv_frame(self, frame: CANFrame):
         """Write frame to CSV file"""
         if not self._csv_writer:
             return
@@ -121,15 +131,19 @@ class StreamingOutputWriter(BaseOutputWriter):
             self._write_csv_header()
 
         flat_row = {
-            'timestamp': frame['timestamp'],
-            'can_id': frame['can_id'],
-            'dlc': frame['dlc'],
-            'data_hex': frame['data_hex'],
+            'timestamp_utc': frame.timestamp_utc.isoformat(),
+            'source_timestamp': frame.source_timestamp,
+            'can_id': frame.can_id,
+            'dlc': frame.dlc,
+            'data_hex': frame.data.hex(),
+            'is_extended': frame.is_extended,
+            'is_remote': frame.is_remote,
+            'is_error': frame.is_error,
         }
 
         # Add parsed signals if available
-        if frame.get('parsed'):
-            for signal_name, signal_value in frame['parsed'].items():
+        if frame.parsed_signals:
+            for signal_name, signal_value in frame.parsed_signals.items():
                 flat_row[signal_name] = signal_value
             
         self._csv_writer.writerow(flat_row)
@@ -147,11 +161,21 @@ class StreamingOutputWriter(BaseOutputWriter):
             self._csv_writer.writeheader()
             self._header_written = True
     
-    def _write_json_frame(self, frame: Dict[str, Any]):
+    def _write_json_frame(self, frame: CANFrame):
         """Write frame to JSON stream (newline-delimited)"""
         if not self._json_file:
             return
-        json_frame = self._make_json_serializable(frame)
+        json_frame = self._make_json_serializable({
+            'timestamp_utc': frame.timestamp_utc.isoformat(),
+            'source_timestamp': frame.source_timestamp,
+            'can_id': frame.can_id,
+            'dlc': frame.dlc,
+            'data_hex': frame.data.hex(),
+            'is_extended': frame.is_extended,
+            'is_remote': frame.is_remote,
+            'is_error': frame.is_error,
+            'parsed_signals': frame.parsed_signals,
+        })
         self._json_file.write(json.dumps(json_frame) + '\n')
         self._json_file.flush()
     

@@ -23,7 +23,7 @@ if sys.platform == 'win32':
 
 import time
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 from canpy import CANParser
 from canpy import WriterFactory
@@ -234,10 +234,11 @@ class CANCapture:
                     continue
                 
                 # Parse frame
-                frame_data = self.parser.parse_frame(msg)
+                received_at = datetime.now(timezone.utc)
+                frame = self.parser.parse_frame(msg, timestamp_utc=received_at)
                 
                 # Apply CAN ID filter
-                if not self._matches_filter(frame_data['can_id_dec']):
+                if not self._matches_filter(frame.can_id):
                     continue
                 
                 frame_count += 1
@@ -246,12 +247,12 @@ class CANCapture:
                 if self.writers:
                     for writer in self.writers.values():
                         try:
-                            writer.write_frame(frame_data)
+                            writer.write_frame(frame)
                         except Exception as e:
                             print(f"[ERROR] Failed to write frame to {writer}: {e}")
                 
                 # Display in console
-                self._print_frame(frame_data, frame_count)
+                self._print_frame(frame, frame_count)
                 
                 # Print stats periodically for long captures
                 current_time = time.time()
@@ -284,17 +285,19 @@ class CANCapture:
         
         return True
     
-    def _print_frame(self, frame_data, frame_num) -> None:
+    def _print_frame(self, frame, frame_num) -> None:
         """Print frame to console"""
         if self.config_manager.get_setting('capture', 'no_console'):
             return
         
-        timestamp = datetime.fromtimestamp(frame_data['timestamp']).strftime("%H:%M:%S.%f")[:-3]
-        print(f"[{frame_num:5d}] {timestamp} | ID: {frame_data['can_id']:>4s} | "
-              f"DLC: {frame_data['dlc']} | Data: {frame_data['data_hex']}", end='')
+        timestamp = frame.timestamp_utc.strftime("%H:%M:%S.%f")[:-3]
+        can_id = f"0x{frame.can_id:03X}"
+        data_hex = ' '.join(f"{value:02X}" for value in frame.data)
+        print(f"[{frame_num:5d}] {timestamp} | ID: {can_id:>4s} | "
+              f"DLC: {frame.dlc} | Data: {data_hex}", end='')
         
-        if frame_data.get('parsed') and self.config_manager.get_setting('capture', 'show_parsed'):
-            signals = frame_data['parsed']
+        if frame.parsed_signals and self.config_manager.get_setting('capture', 'show_parsed'):
+            signals = frame.parsed_signals
             signal_str = ' | '.join(f"{k}={v}" for k, v in signals.items())
             print(f" | Signals: {signal_str}")
         else:

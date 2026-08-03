@@ -2,9 +2,10 @@
 
 import csv
 import os
-from datetime import datetime
-from typing import Dict, Any, Optional, Set
+from datetime import datetime, timezone
+from typing import Any, Dict, Mapping, Optional, Set
 
+from canpy.storage import CANFrame
 from canpy.writers.base import BaseOutputWriter
 from canpy.writers.registry import WriterFactory
 
@@ -32,7 +33,16 @@ class CSVWriter(BaseOutputWriter):
         # Streaming file handles
         self._csv_file = None
         self._csv_writer = None
-        self._fieldnames = ['timestamp', 'can_id', 'dlc', 'data_hex']
+        self._fieldnames = [
+            'timestamp_utc',
+            'source_timestamp',
+            'can_id',
+            'dlc',
+            'data_hex',
+            'is_extended',
+            'is_remote',
+            'is_error',
+        ]
         if expected_signals:
             self._fieldnames.extend([f"{sig}" for sig in sorted(expected_signals)])
         self._frame_count = 0
@@ -63,19 +73,47 @@ class CSVWriter(BaseOutputWriter):
         
         return self._filepaths
 
-    def write_frame(self, frame: Dict[str, Any]) -> None:
+    def write_frame(self, frame: CANFrame) -> None:
         """
         Write a single frame to all active streams.
         
         Args:
-            frame: Parsed frame dictionary
+            frame: Standardized CAN frame
         """
+        frame = self._coerce_legacy_frame(frame)
         self._frame_count += 1
 
         if self._csv_file:
             self._write_csv_frame(frame)
+
+    @staticmethod
+    def _coerce_legacy_frame(frame: CANFrame) -> CANFrame:
+        """Keep historical callers working while CANFrame becomes canonical."""
+        if isinstance(frame, CANFrame):
+            return frame
+        if not isinstance(frame, Mapping):
+            raise TypeError("frame must be a CANFrame")
+
+        timestamp = float(frame['timestamp'])
+        can_id_value = frame['can_id']
+        can_id = (
+            int(can_id_value, 0)
+            if isinstance(can_id_value, str)
+            else int(can_id_value)
+        )
+        return CANFrame(
+            timestamp_utc=datetime.fromtimestamp(timestamp, tz=timezone.utc),
+            source_timestamp=timestamp,
+            can_id=can_id,
+            dlc=int(frame['dlc']),
+            data=bytes.fromhex(str(frame['data_hex'])),
+            is_extended=bool(frame.get('is_extended', False)),
+            is_remote=bool(frame.get('is_remote', False)),
+            is_error=bool(frame.get('is_error', False)),
+            parsed_signals=frame.get('parsed'),
+        )
     
-    def _write_csv_frame(self, frame: Dict[str, Any]):
+    def _write_csv_frame(self, frame: CANFrame):
         """Write frame to CSV file"""
         if not self._csv_writer:
             return
@@ -83,15 +121,19 @@ class CSVWriter(BaseOutputWriter):
             self._write_csv_header()
 
         flat_row = {
-            'timestamp': frame['timestamp'],
-            'can_id': frame['can_id'],
-            'dlc': frame['dlc'],
-            'data_hex': frame['data_hex'],
+            'timestamp_utc': frame.timestamp_utc.isoformat(),
+            'source_timestamp': frame.source_timestamp,
+            'can_id': frame.can_id,
+            'dlc': frame.dlc,
+            'data_hex': frame.data.hex(),
+            'is_extended': frame.is_extended,
+            'is_remote': frame.is_remote,
+            'is_error': frame.is_error,
         }
 
         # Add parsed signals if available
-        if frame.get('parsed'):
-            for signal_name, signal_value in frame['parsed'].items():
+        if frame.parsed_signals:
+            for signal_name, signal_value in frame.parsed_signals.items():
                 flat_row[signal_name] = signal_value
             
         self._csv_writer.writerow(flat_row)

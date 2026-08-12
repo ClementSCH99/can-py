@@ -14,10 +14,7 @@ from canpy.storage import CANFrame
 from canpy.writers import CSVWriter, JSONWriter
 
 
-Frame = CANFrame
-
-
-def make_synthetic_frames(frame_count: int) -> List[Frame]:
+def make_synthetic_frames(frame_count: int) -> List[CANFrame]:
     """Build deterministic frames for procedure checks, not format selection."""
     frames = []
     for index in range(frame_count):
@@ -45,8 +42,8 @@ def make_synthetic_frames(frame_count: int) -> List[Frame]:
     return frames
 
 
-def load_ndjson_frames(path: Path, limit: Optional[int] = None) -> List[Frame]:
-    """Load a small existing NDJSON recording for identical writer replay."""
+def load_ndjson_frames(path: Path, limit: Optional[int] = None) -> List[CANFrame]:
+    """Load an existing NDJSON recording for identical writer replay."""
     frames = []
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -114,7 +111,7 @@ def frame_from_record(record: Dict[str, Any], line_number: int) -> CANFrame:
     )
 
 
-def expected_signals(frames: Iterable[Frame]) -> Set[str]:
+def expected_signals(frames: Iterable[CANFrame]) -> Set[str]:
     """Collect parsed-signal columns used by the current CSV writer."""
     names: Set[str] = set()
     for frame in frames:
@@ -124,12 +121,12 @@ def expected_signals(frames: Iterable[Frame]) -> Set[str]:
     return names
 
 
-def frame_time_seconds(frame: Frame) -> float:
+def frame_time_seconds(frame: CANFrame) -> float:
     """Return the best common timeline value available on a baseline frame."""
     return frame.timestamp_utc.timestamp()
 
 
-def capture_duration_seconds(frames: Sequence[Frame]) -> float:
+def capture_duration_seconds(frames: Sequence[CANFrame]) -> float:
     """Measure the time represented between the first and last ordered frame."""
     if len(frames) < 2:
         return 0.0
@@ -153,7 +150,7 @@ def count_complete_records(format_name: str, path: Path) -> int:
 
 def measure_writer(
     format_name: str,
-    frames: Sequence[Frame],
+    frames: Sequence[CANFrame],
     output_dir: Path,
 ) -> Dict[str, Any]:
     """Write all frames, close the file, then measure and validate the result."""
@@ -187,7 +184,7 @@ def measure_writer(
     }
 
 
-def run_baseline(frames: Sequence[Frame], output_dir: Path) -> List[Dict[str, Any]]:
+def run_baseline(frames: Sequence[CANFrame], output_dir: Path) -> List[Dict[str, Any]]:
     """Run the two current writers against the same in-memory frame sequence."""
     if not frames:
         raise ValueError("At least one frame is required")

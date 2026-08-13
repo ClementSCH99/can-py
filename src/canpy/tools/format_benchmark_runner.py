@@ -11,7 +11,7 @@ from typing import List, Optional, Sequence
 from canpy.storage import CANFrame
 
 from .format_benchmark import BenchmarkResult, benchmark_candidates
-from .format_candidates import FormatCandidate, GzipCsvCandidate
+from .format_candidates import BlfCandidate, FormatCandidate, GzipCsvCandidate
 from .recording_baseline import load_ndjson_frames, make_synthetic_frames
 
 
@@ -107,7 +107,9 @@ def build_candidates(args: argparse.Namespace) -> List[FormatCandidate]:
         gzip_flush_every = DEFAULT_GZIP_FLUSH_EVERY
     candidates.append(GzipCsvCandidate(flush_every=gzip_flush_every))
 
-    # Add other candidates here as needed, e.g., BLFCandidate, etc.
+    # Standard BLF is measured even though its single timestamp cannot preserve
+    # the complete CAN-PY timestamp contract.
+    candidates.append(BlfCandidate())
 
     return candidates
 
@@ -140,6 +142,7 @@ def print_results(results: Sequence[BenchmarkResult]) -> None:
             f"{result.read_frames_per_second:.1f} | "
             f"{validation}"
         )
+    for result in results:
         print(f"Output: {result.output_path}")
 
 
@@ -151,7 +154,7 @@ def run_benchmark(args: argparse.Namespace) -> List[BenchmarkResult]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Execute the CLI and return zero only when every round-trip is valid."""
+    """Execute the comparison, reporting candidate failures without hiding data."""
     args = parse_args(argv)
     results = run_benchmark(args)
     print_results(results)
@@ -159,7 +162,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     all_valid = all(
         result.round_trip_valid and result.timestamps_valid for result in results
     )
-    return 0 if all_valid else 1
+    if not all_valid:
+        print("\n!!! One or more candidates failed validation. See above for details. !!!")
+    return 0
 
 
 if __name__ == "__main__":

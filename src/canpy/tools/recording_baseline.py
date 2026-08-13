@@ -19,11 +19,12 @@ def make_synthetic_frames(frame_count: int) -> List[CANFrame]:
     frames = []
     for index in range(frame_count):
         value = index % 256
-        source_timestamp = 1_700_000_000.0 + index * 0.001
+        utc_timestamp = 1_700_000_000.0 + index * 0.001
+        source_timestamp = 100.0 + index * 0.001
         frames.append(
             CANFrame(
                 timestamp_utc=datetime.fromtimestamp(
-                    source_timestamp,
+                    utc_timestamp,
                     tz=timezone.utc,
                 ),
                 source_timestamp=source_timestamp,

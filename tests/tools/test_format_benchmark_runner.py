@@ -14,7 +14,7 @@ from canpy.tools.format_benchmark_runner import (
     parse_args,
     print_results,
 )
-from canpy.tools.format_candidates import GzipCsvCandidate
+from canpy.tools.format_candidates import BlfCandidate, GzipCsvCandidate
 
 
 def test_parse_args_accepts_one_synthetic_source():
@@ -129,9 +129,10 @@ def test_build_candidates_uses_requested_gzip_flush_interval():
 
     candidates = build_candidates(args)
 
-    assert len(candidates) == 1
+    assert len(candidates) == 2
     assert isinstance(candidates[0], GzipCsvCandidate)
     assert candidates[0].flush_every == 250
+    assert isinstance(candidates[1], BlfCandidate)
 
 
 def test_build_candidates_uses_explicit_default():
@@ -139,9 +140,10 @@ def test_build_candidates_uses_explicit_default():
 
     candidates = build_candidates(args)
 
-    assert len(candidates) == 1
+    assert len(candidates) == 2
     assert isinstance(candidates[0], GzipCsvCandidate)
     assert candidates[0].flush_every == DEFAULT_GZIP_FLUSH_EVERY
+    assert isinstance(candidates[1], BlfCandidate)
 
 
 def test_print_results_displays_comparison_metrics(capsys, tmp_path):

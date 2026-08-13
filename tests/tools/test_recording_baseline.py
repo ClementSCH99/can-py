@@ -28,6 +28,16 @@ def test_baseline_writes_and_reads_same_frames(tmp_path):
     assert all(result["size_bytes"] > 0 for result in results)
 
 
+def test_synthetic_frames_keep_timestamp_domains_distinct():
+    frames = make_synthetic_frames(2)
+
+    assert frames[0].timestamp_utc.timestamp() != frames[0].source_timestamp
+    assert (
+        frames[1].timestamp_utc - frames[0].timestamp_utc
+    ).total_seconds() == pytest.approx(0.001)
+    assert frames[1].source_timestamp - frames[0].source_timestamp == pytest.approx(0.001)
+
+
 def test_load_ndjson_frames_respects_limit(tmp_path):
     input_path = tmp_path / "capture.ndjson"
     records = [

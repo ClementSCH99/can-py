@@ -177,3 +177,58 @@ recording is allowed to omit.
 
 The baseline describes current behavior; it does not establish either writer as
 a valid canonical format.
+
+## Compact-format decision
+
+### Decision
+
+The selected canonical format is **segmented Parquet during capture, merged
+atomically into one Parquet file after a clean stop**.
+
+During capture, completed segments are closed Parquet files in a persistent
+`.inprogress` directory beside the intended final output. The active segment
+and the merged output use a `.partial` suffix. Completed segments are removed
+only after the merged file is closed, its row count is verified, and it is
+atomically renamed to the final path.
+
+### Representative comparison
+
+The comparison replayed the first 1,000,000 frames from
+`can_capture_20260731_02_Charge_0-5C_25DegC.ndjson` through every candidate.
+
+| Candidate | Bytes/frame | Write rate | Read rate | Full contract |
+|---|---:|---:|---:|---|
+| Gzip CSV | 9.08 | 114,967 frames/s | 109,765 frames/s | Yes |
+| BLF | 5.54 | 227,043 frames/s | 119,769 frames/s | No |
+| Parquet | 6.72 | 618,755 frames/s | 133,430 frames/s | Yes |
+
+Repeated near-million-frame runs preserved the size ranking but showed timing
+variation, so throughput values are directional rather than guarantees. CPU
+and peak memory were not instrumented; all candidates nevertheless exceeded
+the expected capture rate by a large margin in these local tests.
+
+### Interruption result
+
+- Monolithic Gzip CSV recovered its flushed prefix but ended with `EOFError`.
+- BLF retained readable committed blocks but cannot preserve
+  `source_timestamp` independently from `timestamp_utc`.
+- Monolithic Parquet recovered no rows without its final footer.
+- The segmented-Parquet prototype recovered every finalized segment, ignored
+  only the active partial segment, and retained all source segments when merge
+  finalization was deliberately interrupted. Retrying the merge produced a
+  complete recording with both timestamp domains intact.
+
+### Rejected alternatives
+
+- **BLF:** rejected because its standard CAN-message representation does not
+  preserve the accepted two-timestamp contract.
+- **Gzip CSV:** retained as the low-complexity fallback, but rejected as the
+  canonical format because it is larger, slower, and a force-stopped stream is
+  not structurally complete even when its flushed rows can be recovered.
+- **Monolithic Parquet during capture:** rejected because interruption before
+  footer creation makes the recording unreadable. Segmentation addresses this
+  limitation while retaining Parquet's size, schema, and columnar-read benefits.
+
+PyArrow remains an optional benchmark/storage dependency rather than a
+dependency of basic CAN capture. CSV export and NHR merging remain derived
+operations and must not replace or mutate the canonical Parquet recording.

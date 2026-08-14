@@ -245,6 +245,13 @@ is not automatically production code.
 - rejected formats and the reason for rejection are documented;
 - the choice preserves the accepted timestamp contract.
 
+**Decision**
+
+Segmented Parquet is selected. Finalized segments provide interruption recovery
+during capture and are merged atomically into one final Parquet recording after
+a clean stop. Results and rejected alternatives are recorded in
+[the recording contract](docs/RECORDING_CONTRACT.md#compact-format-decision).
+
 ---
 
 #### Step 2.3 — Define the session layout

@@ -27,6 +27,11 @@ A Python tool to capture raw CAN data from a CANable Z pro+ device and save it t
 pip install -r requirements.txt
 ```
 
+To run the compact-format benchmark, install its optional Parquet dependency:
+```bash
+pip install -e ".[benchmark]"
+```
+
 2. Drivers (Windows):
    - CANable Z pro+ may need USB-to-Serial drivers
    - Download from: https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers

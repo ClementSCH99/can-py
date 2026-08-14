@@ -11,7 +11,8 @@ from typing import List, Optional, Sequence
 from canpy.storage import CANFrame
 
 from .format_benchmark import BenchmarkResult, benchmark_candidates
-from .format_candidates import BlfCandidate, FormatCandidate, GzipCsvCandidate
+from .format_interruption import InterruptionResult, benchmark_candidate_interruptions
+from .format_candidates import FormatCandidate, BlfCandidate, GzipCsvCandidate, ParquetCandidate
 from .recording_baseline import load_ndjson_frames, make_synthetic_frames
 
 
@@ -75,6 +76,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Directory for persistent benchmark artifacts",
     )
 
+    # Add optional argument for testing interruption behavior
+    parser.add_argument(
+        "--test-interruption",
+        action="store_true",
+        help="Also force-stop each writer before close and inspect recovery",
+    )
+
     # Validate argument combinations and parse the arguments
     args = parser.parse_args(argv)
     if args.input_ndjson is None and args.limit is not None:
@@ -107,9 +115,8 @@ def build_candidates(args: argparse.Namespace) -> List[FormatCandidate]:
         gzip_flush_every = DEFAULT_GZIP_FLUSH_EVERY
     candidates.append(GzipCsvCandidate(flush_every=gzip_flush_every))
 
-    # Standard BLF is measured even though its single timestamp cannot preserve
-    # the complete CAN-PY timestamp contract.
     candidates.append(BlfCandidate())
+    candidates.append(ParquetCandidate())
 
     return candidates
 
@@ -146,6 +153,34 @@ def print_results(results: Sequence[BenchmarkResult]) -> None:
         print(f"Output: {result.output_path}")
 
 
+def print_interruption_results(results: Sequence[InterruptionResult]) -> None:
+    """Print recoverability separately from clean round-trip measurements."""
+    print()
+    print(
+        "Interrupted format | Attempted | Recovered | Size (bytes) | "
+        "Read completed | Raw prefix | Timestamp prefix | Read error"
+    )
+    print("-" * 128)
+
+    for result in results:
+        read_error = result.read_error_type or "None"
+        raw_prefix = str(result.raw_prefix_valid) if result.frames_recovered else "N/A"
+        timestamp_prefix = (
+            str(result.timestamps_prefix_valid) if result.frames_recovered else "N/A"
+        )
+        print(
+            f"{result.candidate_name} | "
+            f"{result.frames_attempted} | "
+            f"{result.frames_recovered} | "
+            f"{result.file_size_bytes} | "
+            f"{result.read_completed} | "
+            f"{raw_prefix} | "
+            f"{timestamp_prefix} | "
+            f"{read_error}"
+        )
+        print(f"Interrupted output: {result.output_path}")
+
+
 def run_benchmark(args: argparse.Namespace) -> List[BenchmarkResult]:
     """Load data, build candidates, and execute one persistent benchmark run."""
     frames = load_frames(args)
@@ -164,6 +199,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if not all_valid:
         print("\n!!! One or more candidates failed validation. See above for details. !!!")
+
+    if args.test_interruption:
+        frames = load_frames(args)
+        interruption_results = benchmark_candidate_interruptions(
+            build_candidates(args),
+            frames,
+            Path(args.output_dir) / "interruption",
+        )
+        print_interruption_results(interruption_results)
     return 0
 
 

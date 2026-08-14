@@ -12,8 +12,10 @@ from canpy.tools.format_benchmark_runner import (
     build_candidates,
     load_frames,
     parse_args,
+    print_interruption_results,
     print_results,
 )
+from canpy.tools.format_interruption import InterruptionResult
 from canpy.tools.format_candidates import BlfCandidate, GzipCsvCandidate
 
 
@@ -33,6 +35,21 @@ def test_parse_args_accepts_one_synthetic_source():
     assert args.input_ndjson is None
     assert args.output_dir == Path("benchmark-output")
     assert args.gzip_flush_every == 100
+    assert args.test_interruption is False
+
+
+def test_parse_args_accepts_interruption_test():
+    args = parse_args(
+        [
+            "--synthetic-frames",
+            "10",
+            "--output-dir",
+            "benchmark-output",
+            "--test-interruption",
+        ]
+    )
+
+    assert args.test_interruption is True
 
 
 @pytest.mark.parametrize(
@@ -129,7 +146,7 @@ def test_build_candidates_uses_requested_gzip_flush_interval():
 
     candidates = build_candidates(args)
 
-    assert len(candidates) == 2
+    assert len(candidates) == 3
     assert isinstance(candidates[0], GzipCsvCandidate)
     assert candidates[0].flush_every == 250
     assert isinstance(candidates[1], BlfCandidate)
@@ -140,7 +157,7 @@ def test_build_candidates_uses_explicit_default():
 
     candidates = build_candidates(args)
 
-    assert len(candidates) == 2
+    assert len(candidates) == 3
     assert isinstance(candidates[0], GzipCsvCandidate)
     assert candidates[0].flush_every == DEFAULT_GZIP_FLUSH_EVERY
     assert isinstance(candidates[1], BlfCandidate)
@@ -199,3 +216,27 @@ def test_print_results_marks_invalid_round_trip(capsys, tmp_path):
 
     assert "broken_candidate" in output
     assert "FAILED" in output
+
+
+def test_print_interruption_results_displays_recovery_state(capsys, tmp_path):
+    result = InterruptionResult(
+        candidate_name="gzip_csv",
+        output_path=tmp_path / "gzip_csv_interrupted.csv.gz",
+        frames_attempted=1_001,
+        frames_recovered=1_000,
+        file_size_bytes=8_000,
+        read_completed=False,
+        raw_prefix_valid=True,
+        timestamps_prefix_valid=True,
+        read_error_type="EOFError",
+        read_error_message="Compressed file ended before the end-of-stream marker",
+    )
+
+    print_interruption_results([result])
+    output = capsys.readouterr().out
+
+    assert "Interrupted format" in output
+    assert "gzip_csv" in output
+    assert "1001" in output
+    assert "1000" in output
+    assert "EOFError" in output

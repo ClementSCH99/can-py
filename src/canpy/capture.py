@@ -28,12 +28,22 @@ from datetime import datetime, timezone
 from canpy import CANParser
 from canpy import WriterFactory
 from canpy import ConfigManager
+from canpy.nhr import (
+    BMS_POC_V2_MAPPING,
+    ExternalSnapshotAssembler,
+    ExternalSnapshotForwarder,
+)
 
 
 class CANCapture:
     """Capture and process CAN data"""
     
-    def __init__(self, config_manager: ConfigManager):
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        nhr_forwarder=None,
+        nhr_snapshot_assembler=None,
+    ):
         """
         Initialize CAN capture
         
@@ -45,6 +55,9 @@ class CANCapture:
         self.writers = {}
 
         self.bus = None
+        self.nhr_forwarder = nhr_forwarder
+        self.nhr_snapshot_assembler = nhr_snapshot_assembler
+        self._nhr_forwarding_error = None
 
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
@@ -151,6 +164,19 @@ class CANCapture:
         else:
             self.parser = CANParser(None)
             expected_signals = None
+
+        if self.nhr_snapshot_assembler is not None:
+            missing_signals = sorted(
+                self.nhr_snapshot_assembler.required_dbc_signals
+                - set(expected_signals or [])
+            )
+            if missing_signals:
+                print(
+                    "[ERROR] NHR snapshot signal(s) not found in DBC: "
+                    + ", ".join(missing_signals)
+                )
+                self.disconnect()
+                return False
         
         # Initialize writer if formats specified
         log_formats = self.config_manager.get_setting('output', 'formats')
@@ -212,6 +238,14 @@ class CANCapture:
         print("Starting CAN capture...")
         print("=" * 80)
 
+        if self.nhr_forwarder is not None:
+            try:
+                # The service handshake runs in the worker. CAN acquisition
+                # never waits for HTTP readiness.
+                self.nhr_forwarder.start()
+            except Exception as exc:
+                self._record_nhr_forwarding_error(exc)
+
         start_time = time.time()
         frame_count = 0
         last_stats_time = start_time
@@ -236,6 +270,8 @@ class CANCapture:
                 # Parse frame
                 received_at = datetime.now(timezone.utc)
                 frame = self.parser.parse_frame(msg, timestamp_utc=received_at)
+
+                self._forward_nhr_snapshot(frame)
                 
                 # Apply CAN ID filter
                 if not self._matches_filter(frame.can_id):
@@ -273,6 +309,12 @@ class CANCapture:
             return False
         
         finally:
+            if self.nhr_forwarder is not None:
+                try:
+                    self.nhr_forwarder.stop()
+                except Exception as exc:
+                    self._record_nhr_forwarding_error(exc)
+                self._print_nhr_forwarding_summary()
             # Close streaming writers if active
             if self.writers:
                 for writer in self.writers.values():
@@ -283,7 +325,52 @@ class CANCapture:
         print(f"Capture complete: {frame_count} frames captured")
         print(f"{'=' * 80}\n")
         
-        return True
+        return self._nhr_forwarding_complete()
+
+    def _forward_nhr_snapshot(self, frame) -> None:
+        """Offer decoded data without allowing NHR failures into CAN capture."""
+        if (
+            self.nhr_forwarder is None
+            or self.nhr_snapshot_assembler is None
+            or self._nhr_forwarding_error is not None
+        ):
+            return
+        try:
+            snapshot = self.nhr_snapshot_assembler.observe(frame)
+            if snapshot is not None:
+                self.nhr_forwarder.offer(snapshot)
+        except Exception as exc:
+            self._record_nhr_forwarding_error(exc)
+
+    def _record_nhr_forwarding_error(self, exc: BaseException) -> None:
+        if self._nhr_forwarding_error is None:
+            self._nhr_forwarding_error = f"{type(exc).__name__}: {exc}"
+            print(
+                "[WARNING] NHR forwarding is incomplete; CAN capture continues: "
+                f"{self._nhr_forwarding_error}"
+            )
+
+    def _nhr_forwarding_complete(self) -> bool:
+        if self.nhr_forwarder is None:
+            return True
+        statistics = self.nhr_forwarder.statistics()
+        return (
+            self._nhr_forwarding_error is None
+            and statistics.sent_count > 0
+            and statistics.last_error is None
+        )
+
+    def _print_nhr_forwarding_summary(self) -> None:
+        statistics = self.nhr_forwarder.statistics()
+        print("\nNHR external snapshot summary:")
+        print(f"  Snapshots offered: {statistics.offered_count}")
+        print(f"  Snapshots sent: {statistics.sent_count}")
+        print(f"  Queue drops: {statistics.dropped_count}")
+        print(f"  Cadence coalescing: {statistics.coalesced_count}")
+        print(f"  Ambiguous retries: {statistics.retry_count}")
+        print(f"  API rejections: {statistics.rejected_count}")
+        if statistics.last_error:
+            print(f"  Last forwarding error: {statistics.last_error}")
     
     def _print_frame(self, frame, frame_num) -> None:
         """Print frame to console"""
@@ -407,6 +494,18 @@ USAGE:
         help='Path to user config YAML file (optional). Auto-detects ./user_config.yaml if not provided'
     )
 
+    # Optional NHR-RT external snapshot forwarding
+    parser.add_argument('--nhr-url', default=None)
+    parser.add_argument('--nhr-instrument', default=None)
+    parser.add_argument('--nhr-source-id', default=None)
+    parser.add_argument('--nhr-rate', type=float, default=None)
+    parser.add_argument('--nhr-signal-max-age', type=float, default=None)
+    parser.add_argument(
+        '--nhr-communication-loss-fault-after', type=float, default=None
+    )
+    parser.add_argument('--nhr-queue-size', type=int, default=None)
+    parser.add_argument('--nhr-timeout', type=float, default=None)
+
     args = parser.parse_args()
 
     # Pre-process complex arguments
@@ -456,8 +555,30 @@ USAGE:
         print(f"[ERROR] Configuration error: {e}")
         return 1
     
+    nhr_forwarder = None
+    nhr_snapshot_assembler = None
+    nhr_settings = config_manager.get_section('nhr')
+    if nhr_settings.get('service_url'):
+        nhr_forwarder = ExternalSnapshotForwarder(
+            instrument_id=nhr_settings['instrument_id'],
+            source_id=nhr_settings['source_id'],
+            base_url=nhr_settings['service_url'],
+            queue_size=nhr_settings['queue_size'],
+            publish_rate_hz=nhr_settings['publish_rate_hz'],
+            signal_max_age_s=nhr_settings['signal_max_age_s'],
+            communication_loss_fault_after_s=(
+                nhr_settings['communication_loss_fault_after_s']
+            ),
+            timeout_s=nhr_settings['timeout_s'],
+        )
+        nhr_snapshot_assembler = ExternalSnapshotAssembler(BMS_POC_V2_MAPPING)
+
     # Create capturer
-    capturer = CANCapture(config_manager)
+    capturer = CANCapture(
+        config_manager,
+        nhr_forwarder=nhr_forwarder,
+        nhr_snapshot_assembler=nhr_snapshot_assembler,
+    )
     
     # Connect and capture
     if not capturer.connect():

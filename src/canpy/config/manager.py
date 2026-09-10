@@ -60,6 +60,33 @@ class ConfigManager:
                 raise ValueError(f"Invalid filter CAN ID: {item}. Must be a non-negative integer.")
         return value
 
+    def _validate_nhr_settings(self, value: dict) -> dict:
+        if not isinstance(value, dict):
+            raise ValueError("Invalid NHR settings: expected a mapping")
+        for key in ('service_url', 'instrument_id', 'source_id'):
+            item = value.get(key)
+            if item is not None and (not isinstance(item, str) or not item.strip()):
+                raise ValueError(f"Invalid NHR {key}: expected a non-empty string")
+        for key in (
+            'publish_rate_hz',
+            'signal_max_age_s',
+            'communication_loss_fault_after_s',
+            'timeout_s',
+        ):
+            item = value.get(key)
+            if item is not None and (
+                not isinstance(item, (int, float)) or item <= 0
+            ):
+                raise ValueError(f"Invalid NHR {key}: expected a positive number")
+        queue_size = value.get('queue_size')
+        if queue_size is not None and (
+            isinstance(queue_size, bool)
+            or not isinstance(queue_size, int)
+            or queue_size <= 0
+        ):
+            raise ValueError("Invalid NHR queue_size: expected a positive integer")
+        return value
+
 
     def _load_yaml(self, filepath: Path) -> dict:
         with open(filepath, "r") as f:
@@ -93,6 +120,8 @@ class ConfigManager:
             self._validate_dbc_file(settings['dbc']['file'])
         if 'dbc' in settings and 'filter' in settings['dbc']:
             self._validate_filters(settings['dbc']['filter'])
+        if 'nhr' in settings:
+            self._validate_nhr_settings(settings['nhr'])
         
         return settings
     
@@ -106,6 +135,27 @@ class ConfigManager:
         
         # Validate entire config once more
         self.validate_settings(self._settings)
+
+        nhr = self._settings.get('nhr', {})
+        has_url = bool(nhr.get('service_url'))
+        has_instrument = bool(nhr.get('instrument_id'))
+        if has_url != has_instrument:
+            raise ValueError(
+                "NHR service_url and instrument_id must be configured together"
+            )
+        if has_url and not self._settings.get('dbc', {}).get('file'):
+            raise ValueError("NHR external snapshot forwarding requires a DBC file")
+        signal_max_age_s = nhr.get('signal_max_age_s')
+        communication_loss_s = nhr.get('communication_loss_fault_after_s')
+        if (
+            signal_max_age_s is not None
+            and communication_loss_s is not None
+            and communication_loss_s <= signal_max_age_s
+        ):
+            raise ValueError(
+                "NHR communication_loss_fault_after_s must be greater than "
+                "signal_max_age_s"
+            )
         
         # Lock it
         self._locked = True
@@ -130,6 +180,13 @@ class ConfigManager:
             'CAPTURE_MODE': ('capture', 'mode', str),
             'OUTPUT_DIR': ('output', 'directory', str),
             'DBC_FILE': ('dbc', 'file', str),
+            'NHR_SERVICE_URL': ('nhr', 'service_url', str),
+            'NHR_INSTRUMENT_ID': ('nhr', 'instrument_id', str),
+            'NHR_SOURCE_ID': ('nhr', 'source_id', str),
+            'NHR_SIGNAL_MAX_AGE_S': ('nhr', 'signal_max_age_s', float),
+            'NHR_COMMUNICATION_LOSS_FAULT_AFTER_S': (
+                'nhr', 'communication_loss_fault_after_s', float
+            ),
         }
         
         env_settings = {}
@@ -164,6 +221,17 @@ class ConfigManager:
 
             'dbc': ('dbc', 'file', str),
             'filter_can_id': ('dbc', 'filter', list),
+
+            'nhr_url': ('nhr', 'service_url', str),
+            'nhr_instrument': ('nhr', 'instrument_id', str),
+            'nhr_source_id': ('nhr', 'source_id', str),
+            'nhr_rate': ('nhr', 'publish_rate_hz', float),
+            'nhr_signal_max_age': ('nhr', 'signal_max_age_s', float),
+            'nhr_communication_loss_fault_after': (
+                'nhr', 'communication_loss_fault_after_s', float
+            ),
+            'nhr_queue_size': ('nhr', 'queue_size', int),
+            'nhr_timeout': ('nhr', 'timeout_s', float),
         }
 
         args_settings = {}

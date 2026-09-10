@@ -19,6 +19,7 @@ A Python tool to capture raw CAN data from a CANable Z pro+ device and save it t
 - [ROADMAP.md](ROADMAP.md) — current phase, completed work, and future direction
 - [docs/WORKFLOW.md](docs/WORKFLOW.md) — guided learning and implementation workflow
 - [docs/BRANCHING.md](docs/BRANCHING.md) — branch roles and release gates
+- [docs/NHR_RT_POC_V2.md](docs/NHR_RT_POC_V2.md) — NHR-RT forwarding setup, operation and monitoring
 
 ## Installation
 

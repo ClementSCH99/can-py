@@ -21,3 +21,14 @@ output:
 dbc:
   file: null
   filter: null
+
+# Optional NHR-RT external snapshot forwarding
+nhr:
+  service_url: null
+  instrument_id: null
+  source_id: bms-poc-v2
+  publish_rate_hz: 5.0
+  signal_max_age_s: 2.5
+  communication_loss_fault_after_s: 5.0
+  queue_size: 16
+  timeout_s: 1.0

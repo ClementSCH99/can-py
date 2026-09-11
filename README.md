@@ -59,6 +59,20 @@ python -m canpy.capture --duration 60 --dbc dbc/6.44.4.0.dbc --log csv
 python -m canpy.capture --count 500 --dbc dbc/6.44.4.0.dbc --log csv,json
 ```
 
+Create a derived NHR/CAN CSV at the end of a V2 recording while an NHR
+workflow is producing acquisition samples:
+
+```powershell
+python -m canpy.capture --mode duration --duration 60 `
+  --dbc dbc/6.44.4.0.dbc --log csv,json `
+  --nhr-url http://127.0.0.1:9300 --nhr-instrument sim-1 `
+  --merged-csv `
+  --merged-signals minCellTemp,maxCellTemp,minCellV,maxCellV
+```
+
+The CAN CSV, CAN NDJSON and NHR CSV remain source evidence. The merged CSV is a
+derived UTC as-of join and never replaces or deletes either source.
+
 ### Specify Serial Port
 
 If auto-detection fails, specify the COM port:

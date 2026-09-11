@@ -135,3 +135,45 @@ def test_capture_rejects_dbc_missing_required_snapshot_signal():
     assert result is False
     forwarder.start.assert_not_called()
     capture.bus.recv.assert_not_called()
+
+
+def test_capture_creates_merged_csv_after_sources_close(tmp_path):
+    forwarder = Mock(
+        base_url="http://127.0.0.1:9300", instrument_id="nhr-79503"
+    )
+    forwarder.statistics.return_value = statistics()
+    assembler = Mock(required_dbc_signals=REQUIRED_DBC_SIGNALS)
+    assembler.observe.return_value = snapshot()
+    evidence = SimpleNamespace(
+        csv_path=str(tmp_path / "nhr.csv"), sample_count=10, active=False
+    )
+    evidence_reader = Mock(return_value=evidence)
+    capture = CANCapture(
+        configured_capture(forwarder, assembler).config_manager,
+        nhr_forwarder=forwarder,
+        nhr_snapshot_assembler=assembler,
+        merged_signals={"maxCellV"},
+        nhr_evidence_reader=evidence_reader,
+    )
+    capture.bus = Mock()
+    capture.bus.recv.return_value = Mock()
+    writer = Mock()
+    writer.start_streaming.return_value = {
+        "csv": str(tmp_path / "can_capture_20260910.csv")
+    }
+
+    with (
+        patch("canpy.capture.CANParser") as parser_class,
+        patch("canpy.capture.WriterFactory.create", return_value=writer),
+        patch.object(capture, "_write_merged_csv") as write_merged,
+    ):
+        parser_class.return_value.get_expected_signals.return_value = (
+            REQUIRED_DBC_SIGNALS
+        )
+        parser_class.return_value.parse_frame.return_value = frame()
+        capture.config_manager._settings["output"]["formats"] = ["csv"]
+        result = capture.capture()
+
+    assert result is True
+    writer.stop_streaming.assert_called_once_with()
+    write_merged.assert_called_once_with()

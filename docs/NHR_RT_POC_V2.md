@@ -91,7 +91,8 @@ adapter is not auto-detected on that port:
   --duration 60 `
   --port COM3 `
   --dbc dbc/6.44.4.0.dbc `
-  --log csv `
+  --log csv,json `
+  --output-dir data/poc-v2 `
   --nhr-url http://127.0.0.1:9300 `
   --nhr-instrument sim-1 `
   --nhr-source-id bms-poc-v2 `
@@ -109,6 +110,56 @@ but never succeeded; CAN evidence is still closed normally.
 At the end of the capture, check that `Snapshots sent` is greater than zero,
 that `API rejections` is zero and that no forwarding error is reported. The CSV
 remains the CAN evidence source.
+
+### End-of-recording CAN/NHR merge
+
+`--merged-csv` creates a derived CSV only after the CAN CSV has been closed.
+The command reads the current NHR acquisition path through the public read-only
+`runtime()` API and performs a backward-as-of join over UTC timestamps. Each NHR
+row receives the newest non-future value of every selected CAN signal, plus its
+age and `fresh`, `stale`, or `missing` status.
+
+The merge requires `--log csv` or `--log csv,json`, a DBC, the NHR service and
+at least one signal selected by `--merged-signals` or
+`--merged-signals-file`. The NHR service output directory should be an absolute
+local path so both processes refer unambiguously to the same evidence.
+
+The passive integration test above does not start NHR acquisition and therefore
+has no NHR CSV to merge. Use the merge options only while a simulator or
+physical workflow is producing acquisition samples. For example, the CAN side
+of a supervised workflow session is:
+
+```powershell
+.\.venv\Scripts\python.exe -m canpy.capture `
+  --mode continuous `
+  --port COM3 `
+  --dbc dbc/6.44.4.0.dbc `
+  --log csv,json `
+  --output-dir data/poc-v2 `
+  --nhr-url http://127.0.0.1:9300 `
+  --nhr-instrument nhr-79503 `
+  --nhr-source-id bms-poc-v2 `
+  --nhr-rate 5 `
+  --nhr-signal-max-age 2.5 `
+  --nhr-communication-loss-fault-after 5 `
+  --merged-csv `
+  --merged-signals minCellTemp,maxCellTemp,minCellV,maxCellV `
+  --merged-can-stale-after 2.5
+```
+
+Expected outputs are:
+
+- `can_capture_<timestamp>.csv`: CAN source CSV;
+- `can_capture_<timestamp>.ndjson`: CAN source JSON when `--log csv,json` is used;
+- the acquisition CSV owned by `nhr-rt`;
+- `merged_capture_<timestamp>.csv`: derived CAN/NHR analysis table.
+
+If the merge fails, source files remain unchanged, no partial merged CSV is
+retained and the capture command exits with failure. If NHR acquisition is
+still active, the command warns that only already-flushed samples were merged.
+For a physical workflow, keep CAN-PY publishing until the NHR workflow reaches
+a terminal state; ending CAN-PY first intentionally makes the external source
+stale and can trigger the controlled-stop interlock.
 
 ### Monitoring coverage
 

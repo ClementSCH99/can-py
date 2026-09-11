@@ -1,5 +1,11 @@
 """Public NHR-RT integration helpers."""
 
+from .evidence import (
+    NHRRecordingEvidence,
+    NHRRecordingEvidenceError,
+    read_nhr_recording_evidence,
+)
+
 from .forwarder import (
     ExternalSnapshot,
     ExternalSnapshotForwarder,
@@ -13,6 +19,9 @@ from .snapshot import (
 )
 
 __all__ = [
+    "NHRRecordingEvidence",
+    "NHRRecordingEvidenceError",
+    "read_nhr_recording_evidence",
     "ExternalSnapshot",
     "ExternalSnapshotForwarder",
     "ExternalSnapshotForwardingError",

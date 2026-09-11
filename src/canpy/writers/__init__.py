@@ -19,11 +19,21 @@ from .csv_writer import CSVWriter
 from .json_writer import JSONWriter
 from .registry import WriterFactory
 from .example_writer import ExampleWriter
+from .merged_csv_writer import (
+    MergeResult,
+    MergedCSVError,
+    MergedCSVWriter,
+    load_signal_file,
+)
 
 __all__ = [
     'BaseOutputWriter',
     'CSVWriter',
     'JSONWriter',
     'ExampleWriter',
-    'WriterFactory'
+    'WriterFactory',
+    'MergeResult',
+    'MergedCSVError',
+    'MergedCSVWriter',
+    'load_signal_file',
 ]

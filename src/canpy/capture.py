@@ -32,7 +32,10 @@ from canpy.nhr import (
     BMS_POC_V2_MAPPING,
     ExternalSnapshotAssembler,
     ExternalSnapshotForwarder,
+    NHRRecordingEvidenceError,
+    read_nhr_recording_evidence,
 )
+from canpy.writers import MergedCSVError, MergedCSVWriter, load_signal_file
 
 
 class CANCapture:
@@ -43,6 +46,9 @@ class CANCapture:
         config_manager: ConfigManager,
         nhr_forwarder=None,
         nhr_snapshot_assembler=None,
+        merged_signals=None,
+        merged_can_stale_after_s: float = 2.5,
+        nhr_evidence_reader=read_nhr_recording_evidence,
     ):
         """
         Initialize CAN capture
@@ -58,6 +64,12 @@ class CANCapture:
         self.nhr_forwarder = nhr_forwarder
         self.nhr_snapshot_assembler = nhr_snapshot_assembler
         self._nhr_forwarding_error = None
+        self.merged_signals = set(merged_signals or [])
+        self.merged_can_stale_after_s = merged_can_stale_after_s
+        self.nhr_evidence_reader = nhr_evidence_reader
+        self._can_csv_path = None
+        self._merged_csv_path = None
+        self._merged_csv_error = None
 
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
@@ -177,6 +189,18 @@ class CANCapture:
                 )
                 self.disconnect()
                 return False
+
+        if self.merged_signals:
+            missing_signals = sorted(
+                self.merged_signals - set(expected_signals or [])
+            )
+            if missing_signals:
+                print(
+                    "[ERROR] Merged CAN signal(s) not found in DBC: "
+                    + ", ".join(missing_signals)
+                )
+                self.disconnect()
+                return False
         
         # Initialize writer if formats specified
         log_formats = self.config_manager.get_setting('output', 'formats')
@@ -186,8 +210,10 @@ class CANCapture:
                 writer = WriterFactory.create(format,
                                               output_dir=output_dir,
                                               expected_signals=expected_signals)
-                writer.start_streaming()
+                paths = writer.start_streaming()
                 self.writers[format] = writer
+                if format == "csv":
+                    self._can_csv_path = paths.get("csv")
         
         # Initialize the capture mode
         mode = self.config_manager.get_setting('capture', 'mode') or 'continuous'
@@ -320,12 +346,63 @@ class CANCapture:
                 for writer in self.writers.values():
                     writer.stop_streaming()
             self.disconnect()
+
+        if self.merged_signals:
+            try:
+                self._write_merged_csv()
+            except (MergedCSVError, NHRRecordingEvidenceError, OSError) as exc:
+                self._merged_csv_error = f"{type(exc).__name__}: {exc}"
+                print(
+                    "[ERROR] Merged CSV was not created; source evidence was "
+                    f"preserved: {exc}"
+                )
         
         print(f"\n{'=' * 80}")
         print(f"Capture complete: {frame_count} frames captured")
         print(f"{'=' * 80}\n")
         
-        return self._nhr_forwarding_complete()
+        return self._nhr_forwarding_complete() and self._merged_csv_error is None
+
+    def _write_merged_csv(self) -> None:
+        """Create the derived CSV after the CAN writer has been closed."""
+        if not self._can_csv_path:
+            raise MergedCSVError("CAN CSV path is unavailable")
+        if self.nhr_forwarder is None:
+            raise MergedCSVError("NHR forwarding is not configured")
+
+        evidence = self.nhr_evidence_reader(
+            self.nhr_forwarder.base_url,
+            self.nhr_forwarder.instrument_id,
+        )
+        if evidence.sample_count <= 0:
+            raise MergedCSVError("NHR acquisition contains no samples")
+
+        can_path = Path(self._can_csv_path)
+        if can_path.name.startswith("can_capture_"):
+            output_name = can_path.name.replace(
+                "can_capture_", "merged_capture_", 1
+            )
+        else:
+            output_name = f"merged_{can_path.name}"
+        output_path = can_path.with_name(output_name)
+
+        result = MergedCSVWriter(
+            stale_after_s=self.merged_can_stale_after_s
+        ).merge(
+            can_csv_path=str(can_path),
+            nhr_csv_path=evidence.csv_path,
+            output_path=str(output_path),
+            signals=sorted(self.merged_signals),
+        )
+        self._merged_csv_path = result.path
+        print(f"[OK] Merged CSV saved: {result.path}")
+        print(f"  Merged rows: {result.row_count}")
+        print(f"  NHR CSV: {evidence.csv_path}")
+        if evidence.active:
+            print(
+                "[WARNING] NHR acquisition was still active at merge time; "
+                "the merged CSV includes only samples already flushed to disk"
+            )
 
     def _forward_nhr_snapshot(self, frame) -> None:
         """Offer decoded data without allowing NHR failures into CAN capture."""
@@ -505,6 +582,22 @@ USAGE:
     )
     parser.add_argument('--nhr-queue-size', type=int, default=None)
     parser.add_argument('--nhr-timeout', type=float, default=None)
+    parser.add_argument(
+        '--merged-csv', action='store_true',
+        help='Create a derived NHR + selected CAN signals CSV after capture'
+    )
+    parser.add_argument(
+        '--merged-signals', default=None,
+        help='Comma-separated DBC signals to include in the merged CSV'
+    )
+    parser.add_argument(
+        '--merged-signals-file', default=None,
+        help='Text file containing one merged DBC signal per line'
+    )
+    parser.add_argument(
+        '--merged-can-stale-after', type=float, default=2.5,
+        help='Seconds before a merged CAN signal is stale (default: 2.5)'
+    )
 
     args = parser.parse_args()
 
@@ -536,6 +629,49 @@ USAGE:
             print(f"[ERROR] Invalid log format: {args.log}")
             print("Expected format: comma-separated values (e.g., csv,json)")
             return 1
+
+    merged_signals = set()
+    if args.merged_signals:
+        merged_signals.update(
+            signal.strip()
+            for signal in args.merged_signals.split(',')
+            if signal.strip()
+        )
+    if args.merged_signals_file:
+        try:
+            merged_signals.update(load_signal_file(args.merged_signals_file))
+        except MergedCSVError as exc:
+            print(f"[ERROR] {exc}")
+            return 1
+
+    if args.merged_can_stale_after <= 0:
+        print("[ERROR] --merged-can-stale-after must be positive")
+        return 1
+    if args.merged_csv:
+        if not args.nhr_url or not args.nhr_instrument:
+            print(
+                "[ERROR] --merged-csv requires --nhr-url and "
+                "--nhr-instrument"
+            )
+            return 1
+        if not args.dbc:
+            print("[ERROR] --merged-csv requires --dbc")
+            return 1
+        if not args.log or "csv" not in args.log:
+            print("[ERROR] --merged-csv requires --log csv (or csv,json)")
+            return 1
+        if not merged_signals:
+            print(
+                "[ERROR] --merged-csv requires --merged-signals and/or "
+                "--merged-signals-file"
+            )
+            return 1
+    elif args.merged_signals or args.merged_signals_file:
+        print(
+            "[ERROR] --merged-signals and --merged-signals-file require "
+            "--merged-csv"
+        )
+        return 1
 
     # Update config
     try:
@@ -578,6 +714,8 @@ USAGE:
         config_manager,
         nhr_forwarder=nhr_forwarder,
         nhr_snapshot_assembler=nhr_snapshot_assembler,
+        merged_signals=merged_signals if args.merged_csv else None,
+        merged_can_stale_after_s=args.merged_can_stale_after,
     )
     
     # Connect and capture

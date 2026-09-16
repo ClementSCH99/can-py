@@ -8,7 +8,9 @@ Reads CAN frames from CANable Z pro+ device and saves to CSV/JSON with optional 
 import sys
 import logging
 import os
-from typing import Optional
+import subprocess
+from dataclasses import asdict, is_dataclass
+from typing import Mapping, Optional
 from pathlib import Path
 
 # Suppress python-can debug messages BEFORE importing can
@@ -23,17 +25,25 @@ if sys.platform == 'win32':
 
 import time
 import argparse
+import yaml
 from datetime import datetime, timezone
 
 from canpy import CANParser
 from canpy import WriterFactory
 from canpy import ConfigManager
+from canpy.capture_manifest import (
+    CaptureManifestError,
+    build_capture_manifest,
+    sha256_file,
+    utc_now_text,
+    write_json_atomic,
+)
 from canpy.nhr import (
     BMS_POC_V2_MAPPING,
     ExternalSnapshotAssembler,
     ExternalSnapshotForwarder,
     NHRRecordingEvidenceError,
-    read_nhr_recording_evidence,
+    read_nhr_workflow_evidence,
 )
 from canpy.writers import MergedCSVError, MergedCSVWriter, load_signal_file
 
@@ -48,7 +58,13 @@ class CANCapture:
         nhr_snapshot_assembler=None,
         merged_signals=None,
         merged_can_stale_after_s: float = 2.5,
-        nhr_evidence_reader=read_nhr_recording_evidence,
+        nhr_run_id: Optional[str] = None,
+        nhr_scope: str = "session",
+        nhr_stage_index: Optional[int] = None,
+        nhr_finalize_timeout_s: float = 60.0,
+        merged_output_path: Optional[str] = None,
+        nhr_evidence_reader=read_nhr_workflow_evidence,
+        cli_overrides=None,
     ):
         """
         Initialize CAN capture
@@ -66,73 +82,96 @@ class CANCapture:
         self._nhr_forwarding_error = None
         self.merged_signals = set(merged_signals or [])
         self.merged_can_stale_after_s = merged_can_stale_after_s
+        self.nhr_run_id = nhr_run_id
+        self.nhr_scope = nhr_scope
+        self.nhr_stage_index = nhr_stage_index
+        self.nhr_finalize_timeout_s = nhr_finalize_timeout_s
+        self.merged_output_path = merged_output_path
         self.nhr_evidence_reader = nhr_evidence_reader
         self._can_csv_path = None
         self._merged_csv_path = None
         self._merged_csv_error = None
+        self._can_close_error = None
+        self._manifest_error = None
+        self._manifest_path = None
+        self._source_paths = {}
+        self._forwarding_statistics = None
+        self.capture_id = f"can_capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.cli_overrides = list(cli_overrides or [])
 
     def connect(self) -> bool:
         """Connect to CAN bus via CandleLight or SLCAN device"""
         try:
-            print(f"Scanning for CAN adapters...")
-            
-            # Try auto-detection first
+            import can
+
+            bitrate = self.config_manager.get_setting('can', 'bitrate')
+            preferred_interface = self.config_manager.get_setting('can', 'interface')
+            serial_port = self.config_manager.get_setting('can', 'serial_port')
+
+            # An explicit port is an operator override and keeps the historical
+            # SLCAN behavior. A null port selects automatic adapter discovery.
+            if serial_port:
+                print(f"Trying explicit SLCAN port {serial_port}...")
+                self.bus = can.interface.Bus(
+                    interface='slcan',
+                    channel=serial_port,
+                    bitrate=bitrate,
+                    timeout=1.0,
+                )
+                print(f"[OK] Connected via SLCAN on {serial_port}")
+                return True
+
+            print("Scanning for CAN adapters (serial_port is automatic)...")
             try:
-                import can
                 configs = can.interface.detect_available_configs()
-                
-                # Filter for cantact (CandleLight) devices
-                cantact_configs = [c for c in configs if c.get('interface') == 'cantact']
-                
-                if cantact_configs:
-                    config = cantact_configs[0]
-                    print(f"Found CandleLight adapter: {config}")
-                    
-                    # Extract channel number from format "ch:0"
-                    channel = config.get('channel', '0')
-                    if ':' in str(channel):
-                        channel = str(channel).split(':')[1]
-                    
-                    self.bus = can.interface.Bus(
-                        interface='cantact',
-                        channel=channel,
-                        bitrate=self.config_manager.get_setting('can', 'bitrate'),
-                        timeout=1.0
-                    )
-                    print(f"[OK] Connected via CandleLight USB adapter")
-                    return True
+                supported = [
+                    config for config in configs
+                    if config.get('interface') in {preferred_interface, 'cantact', 'slcan'}
+                ]
+                supported.sort(
+                    key=lambda config: config.get('interface') != preferred_interface
+                )
+                for config in supported:
+                    interface = config.get('interface')
+                    channel = config.get('channel', '0' if interface == 'cantact' else None)
+                    if channel is None:
+                        continue
+                    if interface == 'cantact' and ':' in str(channel):
+                        channel = str(channel).split(':', 1)[1]
+                    print(f"Found {interface} adapter: {config}")
+                    try:
+                        self.bus = can.interface.Bus(
+                            interface=interface,
+                            channel=channel,
+                            bitrate=bitrate,
+                            timeout=1.0,
+                        )
+                    except Exception as exc:
+                        self.bus = None
+                        print(f"[INFO] Could not open detected adapter: {exc}")
+                        continue
+                    else:
+                        print(f"[OK] Connected via auto-detected {interface} adapter")
+                        return True
             except Exception as e:
                 print(f"[INFO] Auto-detection attempt: {e}")
-            
-            # Fallback: Try specific cantact connection
+
+            # Preserve the legacy CandleLight channel-0 fallback for backends
+            # that cannot enumerate adapters but can still open the device.
             try:
-                print(f"Trying CandleLight direct connection...")
+                print("Trying CandleLight direct connection...")
                 self.bus = can.interface.Bus(
                     interface='cantact',
                     channel='0',
-                    bitrate=self.config_manager.get_setting('can', 'bitrate'),
-                    timeout=1.0
+                    bitrate=bitrate,
+                    timeout=1.0,
                 )
                 print(f"[OK] Connected to CandleLight adapter (channel 0)")
                 return True
             except Exception as e:
                 print(f"[INFO] CandleLight direct failed: {e}")
-            
-            # Fallback: Try SLCAN if serial port is specified
-            if self.config_manager.get_setting('can', 'serial_port'):
-                serial_port = self.config_manager.get_setting('can', 'serial_port')
-                print(f"Trying SLCAN on port {serial_port}...")
-                self.bus = can.interface.Bus(
-                    interface='slcan',
-                    channel=serial_port,
-                    bitrate=self.config_manager.get_setting('can', 'bitrate'),
-                    timeout=1.0
-                )
-                print(f"[OK] Connected via SLCAN on {serial_port}")
-                return True
-            
-            print("[OK] Connected to CAN bus")
-            return True
+
+            raise RuntimeError("No compatible CAN adapter could be opened")
             
         except Exception as e:
             print(f"[ERROR] Failed to connect: {e}")
@@ -210,8 +249,11 @@ class CANCapture:
                 writer = WriterFactory.create(format,
                                               output_dir=output_dir,
                                               expected_signals=expected_signals)
-                paths = writer.start_streaming()
+                paths = writer.start_streaming(filename=self.capture_id)
                 self.writers[format] = writer
+                if isinstance(paths, Mapping):
+                    for role, source_path in paths.items():
+                        self._source_paths[role] = Path(source_path)
                 if format == "csv":
                     self._can_csv_path = paths.get("csv")
         
@@ -273,19 +315,24 @@ class CANCapture:
                 self._record_nhr_forwarding_error(exc)
 
         start_time = time.time()
+        started_at_utc = utc_now_text()
         frame_count = 0
         last_stats_time = start_time
+        final_state = "completed"
+        closure_reason = "completed"
         
         try:
             while True:
                 # Check duration
                 if mode == 'duration' and (time.time() - start_time) > duration:
                     print(f"\n[OK] Duration limit reached ({duration}s)")
+                    closure_reason = "duration_limit"
                     break
                 
                 # Check count
                 if mode == 'count' and frame_count >= count:
                     print(f"\n[OK] Frame count limit reached ({count} frames)")
+                    closure_reason = "count_limit"
                     break
                 
                 # Read message
@@ -312,6 +359,9 @@ class CANCapture:
                             writer.write_frame(frame)
                         except Exception as e:
                             print(f"[ERROR] Failed to write frame to {writer}: {e}")
+                            final_state = "failed"
+                            closure_reason = "writer_error"
+                            raise
                 
                 # Display in console
                 self._print_frame(frame, frame_count)
@@ -327,41 +377,145 @@ class CANCapture:
         
         except KeyboardInterrupt:
             print(f"\n[OK] Capture stopped by user")
+            closure_reason = "user_interrupt"
         
         except Exception as e:
             # Safely print error without Unicode issues
             error_msg = str(e).replace('\u2713', 'OK').replace('\u2717', 'ERROR')
             print(f"\n[ERROR] Capture error: {error_msg}")
-            return False
+            final_state = "failed"
+            closure_reason = "capture_error"
         
         finally:
+            # Close and flush every CAN-owned source before any NHR HTTP wait.
+            close_errors = []
+            if self.writers:
+                for writer in self.writers.values():
+                    try:
+                        writer.stop_streaming()
+                    except Exception as exc:
+                        close_errors.append(f"{type(exc).__name__}: {exc}")
+            try:
+                self.disconnect()
+            except Exception as exc:
+                close_errors.append(f"{type(exc).__name__}: {exc}")
+            if close_errors:
+                self._can_close_error = "; ".join(close_errors)
+                print(f"[ERROR] One or more CAN sources did not close cleanly: {self._can_close_error}")
+
             if self.nhr_forwarder is not None:
                 try:
                     self.nhr_forwarder.stop()
                 except Exception as exc:
                     self._record_nhr_forwarding_error(exc)
                 self._print_nhr_forwarding_summary()
-            # Close streaming writers if active
-            if self.writers:
-                for writer in self.writers.values():
-                    writer.stop_streaming()
-            self.disconnect()
 
-        if self.merged_signals:
+            ended_at_utc = utc_now_text()
+            if close_errors:
+                final_state = "failed"
+                closure_reason = "source_close_error"
+
+            if self._source_paths:
+                try:
+                    self._write_capture_manifest(
+                        started_at_utc=started_at_utc,
+                        ended_at_utc=ended_at_utc,
+                        final_state=final_state,
+                        closure_reason=closure_reason,
+                        frame_count=frame_count,
+                    )
+                except (CaptureManifestError, OSError) as exc:
+                    self._manifest_error = f"{type(exc).__name__}: {exc}"
+                    print(
+                        "[ERROR] CAN manifest was not created; all closed CAN "
+                        f"sources were preserved: {exc}"
+                    )
+
+        if self.merged_signals and self._can_close_error is None and final_state == "completed":
             try:
-                self._write_merged_csv()
+                if self.nhr_run_id:
+                    self._write_merged_csv()
+                else:
+                    self._print_deferred_merge_command()
             except (MergedCSVError, NHRRecordingEvidenceError, OSError) as exc:
                 self._merged_csv_error = f"{type(exc).__name__}: {exc}"
                 print(
                     "[ERROR] Merged CSV was not created; source evidence was "
                     f"preserved: {exc}"
                 )
+        elif self._manifest_path and final_state == "completed":
+            self._print_deferred_merge_command()
         
         print(f"\n{'=' * 80}")
         print(f"Capture complete: {frame_count} frames captured")
         print(f"{'=' * 80}\n")
         
-        return self._nhr_forwarding_complete() and self._merged_csv_error is None
+        return (
+            self._nhr_forwarding_complete()
+            and self._merged_csv_error is None
+            and self._can_close_error is None
+            and self._manifest_error is None
+            and final_state == "completed"
+        )
+
+    def _write_capture_manifest(
+        self,
+        *,
+        started_at_utc: str,
+        ended_at_utc: str,
+        final_state: str,
+        closure_reason: str,
+        frame_count: int,
+    ) -> None:
+        output_dir = Path(self.config_manager.get_setting('output', 'directory')).resolve()
+        manifest_path = output_dir / f"{self.capture_id}.manifest.json"
+        settings = self.config_manager.get_section()
+        profile = None
+        if self.config_manager.profile_path is not None:
+            profile = {
+                "path": self.config_manager.profile_configured_path,
+                "sha256": self.config_manager.profile_sha256,
+            }
+        dbc_path = settings.get("dbc", {}).get("file")
+        dbc = None
+        if dbc_path:
+            resolved_dbc = Path(dbc_path).resolve()
+            dbc = {"path": Path(dbc_path).as_posix(), "sha256": sha256_file(resolved_dbc)}
+        nhr = settings.get("nhr", {})
+        merge = settings.get("merge", {})
+        effective_config = {
+            "can": dict(settings.get("can", {})),
+            "capture": dict(settings.get("capture", {})),
+            "output": dict(settings.get("output", {})),
+            "cli_overrides": list(self.cli_overrides),
+        }
+        payload = build_capture_manifest(
+            manifest_path=manifest_path,
+            capture_id=self.capture_id,
+            started_at_utc=started_at_utc,
+            ended_at_utc=ended_at_utc,
+            final_state=final_state,
+            closure_reason=closure_reason,
+            frame_count=frame_count,
+            source_paths=sorted(self._source_paths.items()),
+            effective_config=effective_config,
+            profile=profile,
+            dbc=dbc,
+            nhr_identity={
+                "service_url": nhr.get("service_url"),
+                "instrument_id": nhr.get("instrument_id"),
+                "source_id": nhr.get("source_id"),
+            },
+            forwarding_statistics=self._forwarding_statistics,
+            merge_defaults={
+                "scope": merge.get("default_scope"),
+                "can_stale_after_s": merge.get("can_stale_after_s"),
+                "signals": list(merge.get("signals", [])),
+            },
+        )
+        write_json_atomic(manifest_path, payload)
+        self._manifest_path = str(manifest_path.resolve())
+        print(f"[OK] CAN manifest saved: {self._manifest_path}")
 
     def _write_merged_csv(self) -> None:
         """Create the derived CSV after the CAN writer has been closed."""
@@ -373,18 +527,13 @@ class CANCapture:
         evidence = self.nhr_evidence_reader(
             self.nhr_forwarder.base_url,
             self.nhr_forwarder.instrument_id,
+            self.nhr_run_id,
+            scope=self.nhr_scope,
+            stage_index=self.nhr_stage_index,
+            timeout_s=self.nhr_finalize_timeout_s,
         )
-        if evidence.sample_count <= 0:
-            raise MergedCSVError("NHR acquisition contains no samples")
-
         can_path = Path(self._can_csv_path)
-        if can_path.name.startswith("can_capture_"):
-            output_name = can_path.name.replace(
-                "can_capture_", "merged_capture_", 1
-            )
-        else:
-            output_name = f"merged_{can_path.name}"
-        output_path = can_path.with_name(output_name)
+        output_path = self._default_merged_output_path()
 
         result = MergedCSVWriter(
             stale_after_s=self.merged_can_stale_after_s
@@ -396,13 +545,41 @@ class CANCapture:
         )
         self._merged_csv_path = result.path
         print(f"[OK] Merged CSV saved: {result.path}")
-        print(f"  Merged rows: {result.row_count}")
-        print(f"  NHR CSV: {evidence.csv_path}")
-        if evidence.active:
-            print(
-                "[WARNING] NHR acquisition was still active at merge time; "
-                "the merged CSV includes only samples already flushed to disk"
-            )
+        print(f"  NHR run: {evidence.run_id} ({evidence.workflow_state})")
+        print(f"  NHR artifact: {evidence.role} ({evidence.csv_path})")
+        print(f"  CAN UTC: {result.can_start_utc} -> {result.can_end_utc}")
+        print(f"  NHR UTC: {result.nhr_start_utc} -> {result.nhr_end_utc}")
+        print(f"  Overlap: {result.overlap_duration_s:.6f} s")
+        print(f"  CAN rows before NHR: {result.can_rows_before_nhr}")
+        print(f"  CAN rows after NHR: {result.can_rows_after_nhr}")
+        print(f"  NHR rows merged: {result.nhr_rows_merged}")
+
+    def _default_merged_output_path(self) -> Path:
+        if self.merged_output_path:
+            return Path(self.merged_output_path)
+        can_path = Path(self._can_csv_path)
+        if can_path.name.startswith("can_capture_"):
+            output_name = can_path.name.replace("can_capture_", "merged_capture_", 1)
+        else:
+            output_name = f"merged_{can_path.name}"
+        return can_path.with_name(output_name)
+
+    def _print_deferred_merge_command(self) -> None:
+        """Print the normal explicit post-test command without contacting NHR-RT."""
+        if not self._manifest_path:
+            return
+        command = [
+            sys.executable,
+            "-m",
+            "canpy.tools.merge_nhr_csv",
+            "--can-manifest",
+            self._manifest_path,
+            "--nhr-run-id",
+            "REPLACE_WITH_EXACT_RUN_ID",
+        ]
+        print(f"[INFO] CAN manifest: {self._manifest_path}")
+        print("[INFO] After the exact NHR run is finalized, execute:")
+        print(subprocess.list2cmdline(command))
 
     def _forward_nhr_snapshot(self, frame) -> None:
         """Offer decoded data without allowing NHR failures into CAN capture."""
@@ -439,6 +616,16 @@ class CANCapture:
 
     def _print_nhr_forwarding_summary(self) -> None:
         statistics = self.nhr_forwarder.statistics()
+        if is_dataclass(statistics):
+            self._forwarding_statistics = asdict(statistics)
+        else:
+            self._forwarding_statistics = {
+                key: getattr(statistics, key, None)
+                for key in (
+                    "offered_count", "sent_count", "dropped_count",
+                    "coalesced_count", "retry_count", "rejected_count", "last_error",
+                )
+            }
         print("\nNHR external snapshot summary:")
         print(f"  Snapshots offered: {statistics.offered_count}")
         print(f"  Snapshots sent: {statistics.sent_count}")
@@ -477,166 +664,154 @@ class CANCapture:
                 pass
 
 
-def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(
-        description='CAN data capture tool - reads from CANable Z pro+ device',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
-USAGE:
-  By default, frames are printed to console:
-  
-  # Capture mode (default: continuous until Ctrl+C, or specify duration/count)
-  python can_capture.py --duration 30
-  
-  # Capture and parse signals (requires DBC)
-  python can_capture.py --duration 60 --dbc car.dbc
-  
-  # Save to files (CSV, JSON, or both)
-  python can_capture.py --duration 30 --log csv,json --dbc car.dbc
-  
-  # Continuous capture (press Ctrl+C to stop)
-  python can_capture.py --dbc car.dbc --log json
-  
-  # Filter by CAN ID
-  python can_capture.py --duration 30 --filter-can-id 0x123
-  
-  # Filter by multiple CAN IDs
-  python can_capture.py --duration 30 --filter-can-id 0x123,0x456,0x789
+def _resolve_profile_argument(profile: Optional[str], config: Optional[str]) -> Optional[Path]:
+    if profile and config and Path(profile).resolve() != Path(config).resolve():
+        raise ValueError("--profile and legacy --config cannot reference different files")
+    return Path(profile or config) if profile or config else None
 
-  # Load specific user config file
-  python can_capture.py --config my_config.yaml
-        '''
-    )
-    
-    # CAN settings
-    parser.add_argument(
-        '--interface', default=None,
-        help='CAN interface to use (e.g., cantact, slcan)'
-    )
-    parser.add_argument(
-        '--bitrate', type=int, default=None,
-        help='CAN bitrate in bps (default: 500000)'
-    )
-    parser.add_argument(
-        '--port', default=None,
-        help='Serial port for CANable device (e.g., COM3, /dev/ttyUSB0)'
-    )
 
-    # Capture settings
-    parser.add_argument(
-        '--mode', default=None, choices=['duration', 'count', 'continuous'],
-        help='Capture mode: continuous (default), duration, or count'
+def _significant_cli_overrides(args) -> list[str]:
+    names = (
+        "interface", "bitrate", "port", "mode", "duration", "count",
+        "no_console", "show_parsed", "output_dir", "log", "dbc",
+        "filter_can_id", "nhr_url", "nhr_instrument", "nhr_source_id",
+        "nhr_rate", "nhr_signal_max_age", "nhr_communication_loss_fault_after",
+        "nhr_queue_size", "nhr_timeout",
     )
-    parser.add_argument(
-        '--duration', type=int, default=None,
-        help='Capture duration in seconds'
-    )
-    parser.add_argument(
-        '--count', type=int, default=None,
-        help='Number of frames to capture'
-    )
-    parser.add_argument(
-        '--no-console', action='store_true',
-        help='Disable console output'
-    )
-    parser.add_argument(
-        '--show-parsed', action='store_true',
-        help='Show parsed signal values in console (requires DBC)'
-    )
+    return [
+        "--" + name.replace("_", "-")
+        for name in names
+        if getattr(args, name, None) not in (None, False)
+    ]
 
-    # Output settings
-    parser.add_argument(
-        '--output-dir', default=None,
-        help='Output directory for files (default: data)'
-    )
-    parser.add_argument(
-        '--log', default=None,
-        help='Log to files in formats: csv,json,txt (comma-separated, no spaces)'
-    )
 
-    # DBC settings
-    parser.add_argument(
-        '--dbc', default=None,
-        help='Path to DBC file for signal decoding'
-    )
-
-    # Other settings
-    parser.add_argument(
-        '--filter-can-id', default=None,
-        help='Filter by CAN ID(s): comma-separated hex values (e.g., 0x123,0x456 or 0x123)'
-    )
-    parser.add_argument(
-        '--config', default=None,
-        help='Path to user config YAML file (optional). Auto-detects ./user_config.yaml if not provided'
-    )
-
-    # Optional NHR-RT external snapshot forwarding
-    parser.add_argument('--nhr-url', default=None)
-    parser.add_argument('--nhr-instrument', default=None)
-    parser.add_argument('--nhr-source-id', default=None)
-    parser.add_argument('--nhr-rate', type=float, default=None)
-    parser.add_argument('--nhr-signal-max-age', type=float, default=None)
-    parser.add_argument(
-        '--nhr-communication-loss-fault-after', type=float, default=None
-    )
-    parser.add_argument('--nhr-queue-size', type=int, default=None)
-    parser.add_argument('--nhr-timeout', type=float, default=None)
-    parser.add_argument(
-        '--merged-csv', action='store_true',
-        help='Create a derived NHR + selected CAN signals CSV after capture'
-    )
-    parser.add_argument(
-        '--merged-signals', default=None,
-        help='Comma-separated DBC signals to include in the merged CSV'
-    )
-    parser.add_argument(
-        '--merged-signals-file', default=None,
-        help='Text file containing one merged DBC signal per line'
-    )
-    parser.add_argument(
-        '--merged-can-stale-after', type=float, default=2.5,
-        help='Seconds before a merged CAN signal is stale (default: 2.5)'
-    )
-
-    args = parser.parse_args()
-
-    # Pre-process complex arguments
-    if args.filter_can_id:
-        try:
-            filter_can_ids = []
-            for can_id_str in args.filter_can_id.split(','):
-                # Parse hex or decimal
-                if can_id_str.lower().startswith('0x'):
-                    can_id = int(can_id_str, 16)
-                else:
-                    can_id = int(can_id_str)
-                filter_can_ids.append(can_id)
-            args.filter_can_id = filter_can_ids
-        except ValueError:
-            print(f"[ERROR] Invalid CAN ID filter format: {args.filter_can_id}")
-            print("Expected format: comma-separated hex values (e.g., 0x123,0x456)")
-            return 1
-    
-    if args.log:
-        try:
-            log_formats = []
-            for fmt in args.log.split(','):
-                fmt = fmt.strip().lower()
-                log_formats.append(fmt)
-            args.log = log_formats
-        except Exception as e:
-            print(f"[ERROR] Invalid log format: {args.log}")
-            print("Expected format: comma-separated values (e.g., csv,json)")
-            return 1
-
-    merged_signals = set()
-    if args.merged_signals:
-        merged_signals.update(
-            signal.strip()
-            for signal in args.merged_signals.split(',')
-            if signal.strip()
+def _print_effective_configuration(config_manager: ConfigManager, overrides) -> None:
+    settings = config_manager.get_section()
+    print("\nEffective CAN-PY configuration:")
+    if config_manager.profile_path:
+        print(
+            f"  Profile: {config_manager.profile_path} "
+            f"(sha256:{config_manager.profile_sha256})"
         )
+    else:
+        print("  Profile: built-in defaults (no profile file)")
+    can = settings["can"]
+    print(
+        f"  CAN: {can.get('interface')} | port={can.get('serial_port')} | "
+        f"bitrate={can.get('bitrate')}"
+    )
+    dbc_path = settings.get("dbc", {}).get("file")
+    if dbc_path:
+        print(f"  DBC: {Path(dbc_path).resolve()} (sha256:{sha256_file(Path(dbc_path))})")
+    else:
+        print("  DBC: none")
+    output = settings["output"]
+    print(f"  Output: {output.get('directory')} | formats={output.get('formats')}")
+    nhr = settings.get("nhr", {})
+    print(
+        f"  NHR: service={nhr.get('service_url')} | "
+        f"instrument={nhr.get('instrument_id')} | source={nhr.get('source_id')}"
+    )
+    merge = settings.get("merge", {})
+    print(
+        f"  Merge defaults: scope={merge.get('default_scope')} | "
+        f"stale={merge.get('can_stale_after_s')} s | "
+        f"signals={','.join(merge.get('signals', []))}"
+    )
+    print(f"  CLI overrides: {', '.join(overrides) if overrides else 'none'}\n")
+
+
+def main(argv=None):
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="CAN capture with an explicit post-test CAN/NHR merge",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Daily: python -m canpy.capture --profile configs/canpy/bms-nhr-poc-v2.yaml\n"
+            "Ctrl+C is a successful operator closure; the command prints the manifest "
+            "and suggested post-test merge."
+        ),
+    )
+    daily = parser.add_argument_group("daily options")
+    capture_group = parser.add_argument_group("capture overrides")
+    nhr_group = parser.add_argument_group("NHR integration")
+    merge_group = parser.add_argument_group("advanced/deprecated capture-time merge")
+
+    daily.add_argument("--profile", default=None, help="Operator profile YAML")
+    daily.add_argument("--config", default=None, help="Compatibility alias for --profile")
+    capture_group.add_argument("--interface", default=None)
+    capture_group.add_argument("--bitrate", type=int, default=None)
+    capture_group.add_argument("--port", default=None)
+    capture_group.add_argument(
+        "--mode", choices=("duration", "count", "continuous"), default=None
+    )
+    capture_group.add_argument("--duration", type=int, default=None)
+    capture_group.add_argument("--count", type=int, default=None)
+    capture_group.add_argument("--no-console", action="store_true")
+    capture_group.add_argument("--show-parsed", action="store_true")
+    capture_group.add_argument("--output-dir", default=None)
+    capture_group.add_argument("--log", default=None, help="csv,json")
+    capture_group.add_argument("--dbc", default=None)
+    capture_group.add_argument("--filter-can-id", default=None)
+
+    nhr_group.add_argument("--nhr-url", default=None)
+    nhr_group.add_argument("--nhr-instrument", default=None)
+    nhr_group.add_argument("--nhr-source-id", default=None)
+    nhr_group.add_argument("--nhr-rate", type=float, default=None)
+    nhr_group.add_argument("--nhr-signal-max-age", type=float, default=None)
+    nhr_group.add_argument("--nhr-communication-loss-fault-after", type=float, default=None)
+    nhr_group.add_argument("--nhr-queue-size", type=int, default=None)
+    nhr_group.add_argument("--nhr-timeout", type=float, default=None)
+
+    merge_group.add_argument(
+        "--merged-csv", action="store_true",
+        help="Advanced/deprecated special case; prefer post-test merge_nhr_csv",
+    )
+    merge_group.add_argument("--merged-signals", default=None)
+    merge_group.add_argument("--merged-signals-file", default=None)
+    merge_group.add_argument("--merged-can-stale-after", type=float, default=None)
+    merge_group.add_argument("--nhr-run-id", default=None)
+    merge_group.add_argument(
+        "--nhr-scope", choices=("session", "sequence", "stage"), default=None
+    )
+    merge_group.add_argument("--nhr-stage-index", type=int, default=None)
+    merge_group.add_argument("--nhr-finalize-timeout", type=float, default=60.0)
+    merge_group.add_argument("--merged-output", default=None)
+    args = parser.parse_args(argv)
+
+    try:
+        if args.filter_can_id:
+            args.filter_can_id = [int(item, 0) for item in args.filter_can_id.split(",")]
+        if args.log:
+            args.log = [item.strip().lower() for item in args.log.split(",")]
+        profile_path = _resolve_profile_argument(args.profile, args.config)
+        config_manager = ConfigManager()
+        config_manager.load_defaults_conf()
+        if profile_path:
+            config_manager.load_user_conf(profile_path)
+            print(f"[OK] Loaded operator profile from {profile_path}")
+        elif Path("user_config.yaml").exists():
+            config_manager.load_user_conf(Path("user_config.yaml"))
+            print("[OK] Loaded compatibility profile from ./user_config.yaml")
+        config_manager.load_env_conf()
+        config_manager.load_args_conf(args)
+        config_manager.validate_config()
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        print(f"[ERROR] Configuration error: {exc}")
+        return 1
+
+    overrides = _significant_cli_overrides(args)
+    _print_effective_configuration(config_manager, overrides)
+    merge_settings = config_manager.get_section("merge")
+    nhr_scope = args.nhr_scope or merge_settings["default_scope"]
+    stale_after = (
+        args.merged_can_stale_after
+        if args.merged_can_stale_after is not None
+        else merge_settings["can_stale_after_s"]
+    )
+    merged_signals = set(merge_settings["signals"] if args.merged_csv else [])
+    if args.merged_signals:
+        merged_signals = {item.strip() for item in args.merged_signals.split(",") if item.strip()}
     if args.merged_signals_file:
         try:
             merged_signals.update(load_signal_file(args.merged_signals_file))
@@ -644,87 +819,71 @@ USAGE:
             print(f"[ERROR] {exc}")
             return 1
 
-    if args.merged_can_stale_after <= 0:
-        print("[ERROR] --merged-can-stale-after must be positive")
+    if stale_after <= 0 or args.nhr_finalize_timeout <= 0:
+        print("[ERROR] Merge stale threshold and finalization timeout must be positive")
         return 1
-    if args.merged_csv:
-        if not args.nhr_url or not args.nhr_instrument:
-            print(
-                "[ERROR] --merged-csv requires --nhr-url and "
-                "--nhr-instrument"
-            )
-            return 1
-        if not args.dbc:
-            print("[ERROR] --merged-csv requires --dbc")
-            return 1
-        if not args.log or "csv" not in args.log:
-            print("[ERROR] --merged-csv requires --log csv (or csv,json)")
-            return 1
-        if not merged_signals:
-            print(
-                "[ERROR] --merged-csv requires --merged-signals and/or "
-                "--merged-signals-file"
-            )
-            return 1
-    elif args.merged_signals or args.merged_signals_file:
-        print(
-            "[ERROR] --merged-signals and --merged-signals-file require "
-            "--merged-csv"
-        )
+    if nhr_scope == "stage" and (
+        args.nhr_stage_index is None or args.nhr_stage_index < 0
+    ):
+        print("[ERROR] --nhr-stage-index must be non-negative for stage scope")
+        return 1
+    if nhr_scope != "stage" and args.nhr_stage_index is not None:
+        print("[ERROR] --nhr-stage-index is valid only for stage scope")
+        return 1
+    if not args.merged_csv and (args.merged_signals or args.merged_signals_file):
+        print("[ERROR] --merged-signals options require --merged-csv")
         return 1
 
-    # Update config
-    try:
-        config_manager = ConfigManager()
-        config_manager.load_defaults_conf()
-        if args.config:
-            config_manager.load_user_conf(Path(args.config))
-            print(f"[OK] Loaded user config from {args.config}")
-        else:
-            if Path('user_config.yaml').exists():
-                config_manager.load_user_conf(Path('user_config.yaml'))  # Auto-detect user config file
-                print(f"[OK] Loaded user config from ./user_config.yaml")
-        config_manager.load_env_conf()
-        config_manager.load_args_conf(args)
-        config_manager.validate_config()
-    except Exception as e:
-        print(f"[ERROR] Configuration error: {e}")
-        return 1
-    
+    nhr_settings = config_manager.get_section("nhr")
+    output_settings = config_manager.get_section("output")
+    dbc_settings = config_manager.get_section("dbc")
+    if args.merged_csv:
+        print(
+            "[WARNING] --merged-csv is an advanced compatibility mode. The normal "
+            "operator workflow is the separate post-test merge command."
+        )
+        if not nhr_settings.get("service_url") or not nhr_settings.get("instrument_id"):
+            print("[ERROR] --merged-csv requires configured NHR service and instrument")
+            return 1
+        if not dbc_settings.get("file") or "csv" not in output_settings.get("formats", []):
+            print("[ERROR] --merged-csv requires an effective DBC and CSV output")
+            return 1
+        if not merged_signals:
+            print("[ERROR] --merged-csv requires selected merge signals")
+            return 1
+
     nhr_forwarder = None
     nhr_snapshot_assembler = None
-    nhr_settings = config_manager.get_section('nhr')
-    if nhr_settings.get('service_url'):
+    if nhr_settings.get("service_url"):
         nhr_forwarder = ExternalSnapshotForwarder(
-            instrument_id=nhr_settings['instrument_id'],
-            source_id=nhr_settings['source_id'],
-            base_url=nhr_settings['service_url'],
-            queue_size=nhr_settings['queue_size'],
-            publish_rate_hz=nhr_settings['publish_rate_hz'],
-            signal_max_age_s=nhr_settings['signal_max_age_s'],
-            communication_loss_fault_after_s=(
-                nhr_settings['communication_loss_fault_after_s']
-            ),
-            timeout_s=nhr_settings['timeout_s'],
+            instrument_id=nhr_settings["instrument_id"],
+            source_id=nhr_settings["source_id"],
+            base_url=nhr_settings["service_url"],
+            queue_size=nhr_settings["queue_size"],
+            publish_rate_hz=nhr_settings["publish_rate_hz"],
+            signal_max_age_s=nhr_settings["signal_max_age_s"],
+            communication_loss_fault_after_s=nhr_settings[
+                "communication_loss_fault_after_s"
+            ],
+            timeout_s=nhr_settings["timeout_s"],
         )
         nhr_snapshot_assembler = ExternalSnapshotAssembler(BMS_POC_V2_MAPPING)
 
-    # Create capturer
     capturer = CANCapture(
         config_manager,
         nhr_forwarder=nhr_forwarder,
         nhr_snapshot_assembler=nhr_snapshot_assembler,
         merged_signals=merged_signals if args.merged_csv else None,
-        merged_can_stale_after_s=args.merged_can_stale_after,
+        merged_can_stale_after_s=stale_after,
+        nhr_run_id=args.nhr_run_id,
+        nhr_scope=nhr_scope,
+        nhr_stage_index=args.nhr_stage_index,
+        nhr_finalize_timeout_s=args.nhr_finalize_timeout,
+        merged_output_path=args.merged_output,
+        cli_overrides=overrides,
     )
-    
-    # Connect and capture
-    if not capturer.connect():
+    if not capturer.connect() or not capturer.capture():
         return 1
-    
-    if not capturer.capture():
-        return 1
-    
     print("[OK] Done!")
     return 0
 

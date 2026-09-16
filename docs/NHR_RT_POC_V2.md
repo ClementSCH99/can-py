@@ -111,55 +111,96 @@ At the end of the capture, check that `Snapshots sent` is greater than zero,
 that `API rejections` is zero and that no forwarding error is reported. The CSV
 remains the CAN evidence source.
 
-### End-of-recording CAN/NHR merge
+### Normal post-test CAN/NHR merge
 
-`--merged-csv` creates a derived CSV only after the CAN CSV has been closed.
-The command reads the current NHR acquisition path through the public read-only
-`runtime()` API and performs a backward-as-of join over UTC timestamps. Each NHR
-row receives the newest non-future value of every selected CAN signal, plus its
-age and `fresh`, `stale`, or `missing` status.
+The normal operator path intentionally separates acquisition from the derived
+merge:
 
-The merge requires `--log csv` or `--log csv,json`, a DBC, the NHR service and
-at least one signal selected by `--merged-signals` or
-`--merged-signals-file`. The NHR service output directory should be an absolute
-local path so both processes refer unambiguously to the same evidence.
-
-The passive integration test above does not start NHR acquisition and therefore
-has no NHR CSV to merge. Use the merge options only while a simulator or
-physical workflow is producing acquisition samples. For example, the CAN side
-of a supervised workflow session is:
+1. Start CAN-PY with the operator profile and keep snapshot forwarding active.
+2. Start the workflow from NHR-RT and retain its exact `run_id`.
+3. Wait for NHR-RT to reach a terminal state and finalize its evidence.
+4. Close CAN-PY normally with Ctrl+C.
+5. Run the explicit merge command with the CAN manifest and exact run ID.
 
 ```powershell
-.\.venv\Scripts\python.exe -m canpy.capture `
-  --mode continuous `
-  --port COM3 `
-  --dbc dbc/6.44.4.0.dbc `
-  --log csv,json `
-  --output-dir data/poc-v2 `
-  --nhr-url http://127.0.0.1:9300 `
-  --nhr-instrument nhr-79503 `
-  --nhr-source-id bms-poc-v2 `
-  --nhr-rate 5 `
-  --nhr-signal-max-age 2.5 `
-  --nhr-communication-loss-fault-after 5 `
-  --merged-csv `
-  --merged-signals minCellTemp,maxCellTemp,minCellV,maxCellV `
-  --merged-can-stale-after 2.5
+python -m canpy.capture --profile configs/canpy/bms-nhr-poc-v2.yaml
 ```
+
+`can.serial_port` is `null` in this profile. CAN-PY therefore discovers the
+available adapter/COM port; `--port COMx` remains an explicit SLCAN fallback.
+
+Then:
+
+```powershell
+python -m canpy.tools.merge_nhr_csv `
+  --can-manifest data/poc-v2/can_capture_YYYYMMDD_HHMMSS.manifest.json `
+  --nhr-run-id REPLACE_WITH_EXACT_RUN_ID
+```
+
+The command obtains the closed CAN CSV, service URL, instrument, signals,
+default scope/stale threshold and default destination from the CAN manifest.
+It polls only that exact run through `workflow_run()`, requires a terminal state
+and `recording.finalized == true`, then validates the selected
+`session-evidence.json` artifact's identity, role, size and SHA-256. It never
+uses `runtime.acquisition.evidence_path` and never discovers a latest run.
+
+Expert overrides are `--nhr-scope`, `--nhr-stage-index`, `--signals`,
+`--signals-file`, `--can-stale-after`, `--output`, timeout and polling interval.
+`sequence` selects the executed workflow including post-sequence rest;
+`session` selects canonical complete-session evidence; `stage` requires one
+unique non-negative stage index. Every explicit override is printed.
 
 Expected outputs are:
 
 - `can_capture_<timestamp>.csv`: CAN source CSV;
 - `can_capture_<timestamp>.ndjson`: CAN source JSON when `--log csv,json` is used;
+- `can_capture_<timestamp>.manifest.json`: immutable CAN capture manifest;
 - the acquisition CSV owned by `nhr-rt`;
-- `merged_capture_<timestamp>.csv`: derived CAN/NHR analysis table.
+- `merged_capture_<timestamp>.csv`: derived CAN/NHR analysis table;
+- `merged_capture_<timestamp>.report.json`: separate derived merge report.
 
 If the merge fails, source files remain unchanged, no partial merged CSV is
-retained and the capture command exits with failure. If NHR acquisition is
-still active, the command warns that only already-flushed samples were merged.
+retained and the capture command exits with failure. If the selected NHR run is
+still active or `finalizing`, CAN-PY waits without sending a stop request. If no
+run ID is retained by the capture profile: Ctrl+C closes CAN normally, writes
+the immutable CAN manifest and prints an exact minimal command containing
+`REPLACE_WITH_EXACT_RUN_ID`. CAN-PY never substitutes
+`runtime.acquisition.evidence_path`, because that path is continuous service
+surveillance rather than workflow evidence.
+
+The command reports CAN and NHR UTC start/end, overlap duration, CAN rows before
+and after the NHR window, and merged NHR rows. A zero-overlap merge is rejected.
+The destination is written through a same-directory temporary file and replaced
+atomically only after complete success.
+
 For a physical workflow, keep CAN-PY publishing until the NHR workflow reaches
-a terminal state; ending CAN-PY first intentionally makes the external source
-stale and can trigger the controlled-stop interlock.
+a terminal state whenever the operating procedure allows it; ending CAN-PY
+first intentionally makes the external source stale and can trigger the
+NHR-RT-owned controlled-stop interlock. CAN-PY does not start or stop workflows.
+
+The historical detailed form remains available temporarily for migration:
+
+```powershell
+.\.venv\Scripts\python.exe -m canpy.tools.merge_nhr_csv `
+  --can-csv data/poc-v2/can_capture_YYYYMMDD_HHMMSS.csv `
+  --nhr-url http://127.0.0.1:9300 `
+  --nhr-instrument nhr-79503 `
+  --nhr-run-id REPLACE_WITH_EXACT_RUN_ID `
+  --nhr-scope session `
+  --output data/poc-v2/merged_capture_YYYYMMDD_HHMMSS.csv `
+  --signals minCellTemp,maxCellTemp,minCellV,maxCellV
+```
+
+The capture-time `--merged-csv` options also remain temporarily, but they are an
+advanced/deprecated special case for an already-known run ID. They emit a clear
+warning, are removed from the main procedure, and are not the normal physical
+workflow. Capture never waits for NHR-RT unless that mode was explicitly asked.
+
+The CAN-PY profile configures CAN, output, DBC, forwarding identity and merge
+defaults. It must not contain an NHR run ID, NHR CSV path/runtime state,
+physical authorization, battery limits, or NHR workflow profile/digest. The CAN
+manifest describes closed CAN evidence. NHR-RT's profile and manifest remain
+separate authorities. The merged CSV/report are derived and replace neither.
 
 ### Monitoring coverage
 

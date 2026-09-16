@@ -4,6 +4,7 @@ from .evidence import (
     NHRRecordingEvidence,
     NHRRecordingEvidenceError,
     read_nhr_recording_evidence,
+    read_nhr_workflow_evidence,
 )
 
 from .forwarder import (
@@ -22,6 +23,7 @@ __all__ = [
     "NHRRecordingEvidence",
     "NHRRecordingEvidenceError",
     "read_nhr_recording_evidence",
+    "read_nhr_workflow_evidence",
     "ExternalSnapshot",
     "ExternalSnapshotForwarder",
     "ExternalSnapshotForwardingError",

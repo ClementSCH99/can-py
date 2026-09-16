@@ -59,19 +59,46 @@ python -m canpy.capture --duration 60 --dbc dbc/6.44.4.0.dbc --log csv
 python -m canpy.capture --count 500 --dbc dbc/6.44.4.0.dbc --log csv,json
 ```
 
-Create a derived NHR/CAN CSV at the end of a V2 recording while an NHR
-workflow is producing acquisition samples:
+### Daily CAN/NHR operator path
+
+Start CAN capture and snapshot forwarding from the versioned operator profile:
 
 ```powershell
-python -m canpy.capture --mode duration --duration 60 `
-  --dbc dbc/6.44.4.0.dbc --log csv,json `
-  --nhr-url http://127.0.0.1:9300 --nhr-instrument sim-1 `
-  --merged-csv `
-  --merged-signals minCellTemp,maxCellTemp,minCellV,maxCellV
+python -m canpy.capture --profile configs/canpy/bms-nhr-poc-v2.yaml
 ```
 
-The CAN CSV, CAN NDJSON and NHR CSV remain source evidence. The merged CSV is a
-derived UTC as-of join and never replaces or deletes either source.
+The profile leaves `can.serial_port: null`, so CAN-PY discovers the adapter and
+port automatically. Use `--port COMx` only when an explicit SLCAN override is
+needed.
+
+After NHR-RT has reached a terminal state and finalized the exact retained
+`run_id`, close CAN-PY normally with Ctrl+C. CAN-PY writes and prints the path
+of `can_capture_<timestamp>.manifest.json`. Then run:
+
+
+```powershell
+python -m canpy.tools.merge_nhr_csv `
+  --can-manifest data/poc-v2/can_capture_YYYYMMDD_HHMMSS.manifest.json `
+  --nhr-run-id REPLACE_WITH_EXACT_RUN_ID
+```
+
+The profile defines CAN capture, forwarding identity and merge defaults; it
+never contains an NHR run ID, workflow profile/digest, physical authorization
+or battery limits. The immutable CAN manifest describes only closed CAN source
+files. NHR-RT's own manifest remains authoritative for its workflow evidence.
+The merged CSV and adjacent `.report.json` are separate derived products and do
+not mutate either manifest.
+
+The default profile selects the finalized NHR `sequence` artifact, including
+post-sequence rest. Expert overrides support `session`, `sequence`, and
+`stage --nhr-stage-index N`. The historical detailed merge arguments remain
+available in `--help`. Capture-time `--merged-csv` is retained temporarily as
+an advanced compatibility mode and emits a deprecation warning; it is not the
+normal physical workflow. CAN-PY never starts/stops an NHR workflow and never
+falls back to the continuous surveillance CSV.
+
+See [docs/MERGE_NHR_CSV.md](docs/MERGE_NHR_CSV.md) for the full reference,
+scope procedures and migration from the historical long form.
 
 ### Specify Serial Port
 

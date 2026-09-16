@@ -1,0 +1,37 @@
+schema_version: 1
+name: bms-nhr-poc-v2
+
+can:
+  interface: cantact
+  # null keeps adapter/COM-port discovery automatic; use --port only as override.
+  serial_port: null
+  bitrate: 500000
+
+capture:
+  mode: continuous
+  no_console: false
+  show_parsed: true
+
+output:
+  directory: data/poc-v2
+  formats: [csv, json]
+
+dbc:
+  file: dbc/6.44.4.0.dbc
+
+nhr:
+  service_url: http://127.0.0.1:9300
+  instrument_id: nhr-79503
+  source_id: bms-poc-v2
+  publish_rate_hz: 5
+  signal_max_age_s: 2.5
+  communication_loss_fault_after_s: 5
+
+merge:
+  default_scope: sequence
+  can_stale_after_s: 2.5
+  signals:
+    - minCellTemp
+    - maxCellTemp
+    - minCellV
+    - maxCellV

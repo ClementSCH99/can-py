@@ -62,14 +62,16 @@ minimum metadata contract is:
 
 - session identifier;
 - UTC start time and, when available, UTC end time;
-- final state such as `completed`, `interrupted`, or `failed`;
+- final state `completed` or `failed`, with Ctrl+C represented as successful
+  `completed` plus closure reason `user_interrupt`;
 - CAN interface, channel, bitrate, and active CAN-ID filter;
 - CAN-PY version;
 - DBC path and SHA-256 checksum when a DBC is used;
 - canonical CAN recording path and frame count;
 - each external tool used during the session;
-- for `nhr-rt`, the service/instrument identity and acquisition CSV path;
-- paths to derived outputs such as decoded CSV or merged CSV.
+- for `nhr-rt`, only the configured service/instrument/source identity and
+  forwarding statistics; the CAN manifest never contains a workflow `run_id`;
+- merge defaults (scope, stale threshold and signals).
 
 The checksum detects whether the DBC has changed. A later session-layout
 decision will determine whether the session also stores a DBC snapshot.
@@ -232,3 +234,43 @@ the expected capture rate by a large margin in these local tests.
 PyArrow remains an optional benchmark/storage dependency rather than a
 dependency of basic CAN capture. CSV export and NHR merging remain derived
 operations and must not replace or mutate the canonical Parquet recording.
+
+## CAN capture manifest and finalized NHR workflow evidence
+
+After CAN writers close, CAN-PY atomically writes
+`can_capture_<timestamp>.manifest.json` beside the sources. Source paths are
+manifest-relative canonical POSIX paths; absolute paths, backslashes, `..`,
+non-canonical forms and paths outside the manifest directory are rejected. The
+manifest includes capture identity/times/state/reason/frame count, source sizes,
+effective configuration, profile and DBC hashes, NHR forwarding identity and
+statistics, and merge defaults. It is never updated after creation.
+
+NHR workflow evidence is run-owned and must not be inferred from the continuous
+service surveillance acquisition. For a requested `run_id`, CAN-PY requires a
+terminal workflow snapshot with `recording.finalized == true`, then reads the
+reported `session-evidence.json` and selects exactly one labeled artifact:
+
+- `session_measurements` for complete session scope;
+- `workflow_sequence` for the default executed-sequence scope, including
+  post-sequence rest;
+- `workflow_stage` with one explicit zero-based `stage_index` for a single stage.
+
+The manifest run/instrument identity, artifact containment in the run directory,
+role, size and SHA-256 are verified before any merge. The canonical session path
+is `workflow-runs/<run-id>/measurements/session.csv`. A live
+`runtime.acquisition.evidence_path` is surveillance data and is never a workflow
+merge fallback.
+
+Ctrl+C closes and flushes CAN writers and the CAN bus first, writes a successful
+CAN manifest with `user_interrupt`, and prints the minimal post-processing
+command. Only the separate merge command receives the exact run ID and waits
+for that run to become terminal/finalized with a bounded timeout; it never
+requests workflow stop.
+
+The merged CSV uses NHR timestamps as its row grid within the overlapping UTC
+window and performs a backward-as-of lookup of selected CAN signals. Its
+separate atomic `.report.json` records both identities, selected NHR
+role/hash/size, scope/stage, CAN and NHR bounds, overlap duration, CAN rows
+before/after the NHR window, merged row count, stale threshold and creation UTC.
+Empty overlap is an error. All sources remain read-only, and the destination is
+replaced atomically only after success.

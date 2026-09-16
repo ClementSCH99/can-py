@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,9 +17,24 @@ class MergedCSVError(RuntimeError):
 
 @dataclass(frozen=True)
 class MergeResult:
-    """Path and row count of one completed derived CSV."""
+    """Output identity and auditable UTC coverage for one derived CSV."""
 
     path: str
+    row_count: int
+    can_start_utc: str
+    can_end_utc: str
+    nhr_start_utc: str
+    nhr_end_utc: str
+    overlap_duration_s: float
+    can_rows_before_nhr: int
+    can_rows_after_nhr: int
+    nhr_rows_merged: int
+
+
+@dataclass(frozen=True)
+class _TimeProfile:
+    start: float
+    end: float
     row_count: int
 
 
@@ -27,7 +43,6 @@ def load_signal_file(path: str) -> set[str]:
     signal_path = Path(path)
     if not signal_path.is_file():
         raise MergedCSVError(f"Merged signal file not found: {path}")
-
     signals: set[str] = set()
     try:
         with signal_path.open("r", encoding="utf-8") as handle:
@@ -36,18 +51,16 @@ def load_signal_file(path: str) -> set[str]:
                 if signal:
                     signals.add(signal)
     except OSError as exc:
-        raise MergedCSVError(
-            f"Could not read merged signal file {path}: {exc}"
-        ) from exc
+        raise MergedCSVError(f"Could not read merged signal file {path}: {exc}") from exc
     return signals
 
 
 class MergedCSVWriter:
     """Perform a streaming backward-as-of join over closed source CSV files.
 
-    Each NHR sample becomes one output row. For every selected CAN signal, the
-    merge uses the newest non-future CAN value and records its age and freshness.
-    Source files are read only and the destination is replaced atomically.
+    Output rows follow the selected NHR grid inside the overlapping UTC window.
+    CAN and NHR inputs are read-only. A unique same-directory temporary file is
+    flushed and atomically replaced only after complete validation.
     """
 
     def __init__(self, stale_after_s: float = 2.5) -> None:
@@ -66,26 +79,35 @@ class MergedCSVWriter:
         selected_signals = tuple(sorted(set(signals)))
         if not selected_signals:
             raise MergedCSVError("At least one CAN signal must be selected")
-
         can_path = self._require_file(can_csv_path, "CAN")
         nhr_path = self._require_file(nhr_csv_path, "NHR")
-        can_start_timestamp, can_end_timestamp = self._can_time_bounds(can_path)
-        destination = Path(output_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(destination.name + ".tmp")
+        can_profile = self._time_profile(can_path, "CAN")
+        nhr_profile = self._time_profile(nhr_path, "NHR")
+        overlap_start = max(can_profile.start, nhr_profile.start)
+        overlap_end = min(can_profile.end, nhr_profile.end)
+        if overlap_start > overlap_end:
+            raise MergedCSVError("CAN and NHR CSV files have no overlapping UTC time window")
 
+        can_rows_before, can_rows_after = self._count_can_outside_nhr(
+            can_path, nhr_profile.start, nhr_profile.end
+        )
+        destination = Path(output_path)
+        if destination.resolve() in {can_path.resolve(), nhr_path.resolve()}:
+            raise MergedCSVError(
+                "Merged CSV destination must not overwrite a CAN or NHR source"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
         try:
             with can_path.open("r", newline="", encoding="utf-8-sig") as can_handle:
-                with nhr_path.open(
-                    "r", newline="", encoding="utf-8-sig"
-                ) as nhr_handle:
+                with nhr_path.open("r", newline="", encoding="utf-8-sig") as nhr_handle:
                     row_count = self._merge_handles(
                         can_handle=can_handle,
                         nhr_handle=nhr_handle,
                         output_path=temporary,
                         signals=selected_signals,
-                        can_start_timestamp=can_start_timestamp,
-                        can_end_timestamp=can_end_timestamp,
+                        overlap_start=overlap_start,
+                        overlap_end=overlap_end,
                     )
             os.replace(temporary, destination)
         except (MergedCSVError, OSError, csv.Error, ValueError) as exc:
@@ -97,7 +119,18 @@ class MergedCSVWriter:
                 raise
             raise MergedCSVError(f"Could not create merged CSV: {exc}") from exc
 
-        return MergeResult(path=str(destination.resolve()), row_count=row_count)
+        return MergeResult(
+            path=str(destination.resolve()),
+            row_count=row_count,
+            can_start_utc=self._format_utc(can_profile.start),
+            can_end_utc=self._format_utc(can_profile.end),
+            nhr_start_utc=self._format_utc(nhr_profile.start),
+            nhr_end_utc=self._format_utc(nhr_profile.end),
+            overlap_duration_s=max(0.0, overlap_end - overlap_start),
+            can_rows_before_nhr=can_rows_before,
+            can_rows_after_nhr=can_rows_after,
+            nhr_rows_merged=row_count,
+        )
 
     def _merge_handles(
         self,
@@ -106,66 +139,37 @@ class MergedCSVWriter:
         nhr_handle: TextIO,
         output_path: Path,
         signals: Sequence[str],
-        can_start_timestamp: float,
-        can_end_timestamp: float,
+        overlap_start: float,
+        overlap_end: float,
     ) -> int:
         can_reader = csv.DictReader(can_handle)
         nhr_reader = csv.DictReader(nhr_handle)
         can_fields = self._require_header(can_reader, "CAN")
         nhr_fields = self._require_header(nhr_reader, "NHR")
-
-        if "timestamp" not in can_fields and "timestamp_utc" not in can_fields:
-            raise MergedCSVError(
-                "CAN CSV is missing required timestamp or timestamp_utc column"
-            )
-        if "timestamp_utc" not in nhr_fields:
-            raise MergedCSVError(
-                "NHR CSV is missing required column: timestamp_utc"
-            )
+        self._require_timestamp_column(can_fields, "CAN")
+        self._require_timestamp_column(nhr_fields, "NHR")
         missing_signals = sorted(set(signals) - set(can_fields))
         if missing_signals:
             raise MergedCSVError(
-                "CAN CSV is missing selected signal column(s): "
-                + ", ".join(missing_signals)
+                "CAN CSV is missing selected signal column(s): " + ", ".join(missing_signals)
             )
 
         output_fields = [f"nhr_{field}" for field in nhr_fields]
         for signal in signals:
             output_fields.extend(
-                (
-                    f"can_{signal}",
-                    f"can_{signal}_age_s",
-                    f"can_{signal}_status",
-                )
+                (f"can_{signal}", f"can_{signal}_age_s", f"can_{signal}_status")
             )
-
-        can_rows = self._timed_can_rows(can_reader)
+        can_rows = self._timed_rows(can_reader, "CAN")
         next_can = next(can_rows, None)
         signal_state: Dict[str, tuple[str, float]] = {}
-        previous_nhr_timestamp: Optional[float] = None
         row_count = 0
 
         with output_path.open("w", newline="", encoding="utf-8") as output_handle:
             writer = csv.DictWriter(output_handle, fieldnames=output_fields)
             writer.writeheader()
-
-            for line_number, nhr_row in enumerate(nhr_reader, start=2):
-                nhr_timestamp = self._parse_nhr_timestamp(
-                    nhr_row.get("timestamp_utc"), line_number
-                )
-                if (
-                    previous_nhr_timestamp is not None
-                    and nhr_timestamp < previous_nhr_timestamp
-                ):
-                    raise MergedCSVError(
-                        f"NHR CSV timestamps are not monotonic at line {line_number}"
-                    )
-                previous_nhr_timestamp = nhr_timestamp
-                if nhr_timestamp < can_start_timestamp:
+            for nhr_timestamp, nhr_row in self._timed_rows(nhr_reader, "NHR"):
+                if nhr_timestamp < overlap_start or nhr_timestamp > overlap_end:
                     continue
-                if nhr_timestamp > can_end_timestamp:
-                    continue
-
                 while next_can is not None and next_can[0] <= nhr_timestamp:
                     can_timestamp, can_row = next_can
                     for signal in signals:
@@ -173,100 +177,84 @@ class MergedCSVWriter:
                         if value is not None and value.strip() != "":
                             signal_state[signal] = (value, can_timestamp)
                     next_can = next(can_rows, None)
-
                 output_row = {
                     f"nhr_{field}": nhr_row.get(field, "") for field in nhr_fields
                 }
                 for signal in signals:
-                    value_column = f"can_{signal}"
-                    age_column = f"can_{signal}_age_s"
-                    status_column = f"can_{signal}_status"
                     state = signal_state.get(signal)
                     if state is None:
-                        output_row[value_column] = ""
-                        output_row[age_column] = ""
-                        output_row[status_column] = "missing"
+                        output_row[f"can_{signal}"] = ""
+                        output_row[f"can_{signal}_age_s"] = ""
+                        output_row[f"can_{signal}_status"] = "missing"
                     else:
                         value, signal_timestamp = state
                         age_s = nhr_timestamp - signal_timestamp
-                        output_row[value_column] = value
-                        output_row[age_column] = f"{age_s:.6f}"
-                        output_row[status_column] = (
+                        output_row[f"can_{signal}"] = value
+                        output_row[f"can_{signal}_age_s"] = f"{age_s:.6f}"
+                        output_row[f"can_{signal}_status"] = (
                             "stale" if age_s >= self.stale_after_s else "fresh"
                         )
                 writer.writerow(output_row)
                 row_count += 1
-
-            # Validate remaining CAN timestamps even if NHR recording ended first.
             for _ in can_rows:
                 pass
-
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
         if row_count == 0:
             raise MergedCSVError(
-                "CAN and NHR CSV files have no overlapping UTC time window"
+                "CAN and NHR UTC ranges intersect but contain no NHR row in the overlap"
             )
         return row_count
 
-    def _can_time_bounds(self, path: Path) -> tuple[float, float]:
+    def _time_profile(self, path: Path, label: str) -> _TimeProfile:
         with path.open("r", newline="", encoding="utf-8-sig") as handle:
             reader = csv.DictReader(handle)
-            fields = self._require_header(reader, "CAN")
-            if "timestamp" not in fields and "timestamp_utc" not in fields:
-                raise MergedCSVError(
-                    "CAN CSV is missing required timestamp or timestamp_utc column"
-                )
+            self._require_timestamp_column(self._require_header(reader, label), label)
             first: Optional[float] = None
             last: Optional[float] = None
-            for timestamp, _ in self._timed_can_rows(reader):
+            count = 0
+            for timestamp, _ in self._timed_rows(reader, label):
                 if first is None:
                     first = timestamp
                 last = timestamp
+                count += 1
         if first is None or last is None:
-            raise MergedCSVError("CAN CSV contains no data rows")
-        return first, last
+            raise MergedCSVError(f"{label} CSV contains no data rows")
+        return _TimeProfile(first, last, count)
 
-    def _timed_can_rows(
-        self, reader: Iterable[Mapping[str, str]]
+    def _count_can_outside_nhr(
+        self, path: Path, nhr_start: float, nhr_end: float
+    ) -> tuple[int, int]:
+        before = after = 0
+        with path.open("r", newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            self._require_timestamp_column(self._require_header(reader, "CAN"), "CAN")
+            for timestamp, _ in self._timed_rows(reader, "CAN"):
+                if timestamp < nhr_start:
+                    before += 1
+                elif timestamp > nhr_end:
+                    after += 1
+        return before, after
+
+    def _timed_rows(
+        self, reader: Iterable[Mapping[str, str]], label: str
     ) -> Iterator[tuple[float, Mapping[str, str]]]:
-        previous_timestamp: Optional[float] = None
+        previous: Optional[float] = None
         for line_number, row in enumerate(reader, start=2):
-            timestamp = self._parse_can_timestamp(row, line_number)
-            if previous_timestamp is not None and timestamp < previous_timestamp:
+            timestamp = self._parse_utc_timestamp(
+                row.get("timestamp_utc"), f"{label} timestamp_utc", line_number
+            )
+            if previous is not None and timestamp < previous:
                 raise MergedCSVError(
-                    f"CAN CSV timestamps are not monotonic at line {line_number}"
+                    f"{label} CSV timestamps are not monotonic at line {line_number}"
                 )
-            previous_timestamp = timestamp
+            previous = timestamp
             yield timestamp, row
 
-    @classmethod
-    def _parse_can_timestamp(
-        cls, row: Mapping[str, str], line_number: int
-    ) -> float:
-        timestamp_utc = row.get("timestamp_utc")
-        if timestamp_utc:
-            return cls._parse_iso_timestamp(
-                timestamp_utc, "CAN timestamp_utc", line_number
-            )
-        raw_timestamp = row.get("timestamp")
-        try:
-            return float(raw_timestamp)
-        except (TypeError, ValueError) as exc:
-            raise MergedCSVError(
-                f"Invalid CAN timestamp at line {line_number}: {raw_timestamp!r}"
-            ) from exc
-
     @staticmethod
-    def _parse_nhr_timestamp(value: Optional[str], line_number: int) -> float:
+    def _parse_utc_timestamp(value: Optional[str], label: str, line_number: int) -> float:
         if not value:
-            raise MergedCSVError(
-                f"Missing NHR timestamp_utc at line {line_number}"
-            )
-        return MergedCSVWriter._parse_iso_timestamp(
-            value, "NHR timestamp_utc", line_number
-        )
-
-    @staticmethod
-    def _parse_iso_timestamp(value: str, label: str, line_number: int) -> float:
+            raise MergedCSVError(f"Missing {label} at line {line_number}")
         timestamp_text = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
             timestamp = datetime.fromisoformat(timestamp_text)
@@ -274,11 +262,13 @@ class MergedCSVWriter:
             raise MergedCSVError(
                 f"Invalid {label} at line {line_number}: {value!r}"
             ) from exc
-        if timestamp.tzinfo is None:
-            raise MergedCSVError(
-                f"{label} has no timezone at line {line_number}"
-            )
-        return timestamp.astimezone(timezone.utc).timestamp()
+        if timestamp.tzinfo is None or timestamp.utcoffset() != timezone.utc.utcoffset(timestamp):
+            raise MergedCSVError(f"{label} is not UTC at line {line_number}")
+        return timestamp.timestamp()
+
+    @staticmethod
+    def _format_utc(value: float) -> str:
+        return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
 
     @staticmethod
     def _require_file(path: str, label: str) -> Path:
@@ -292,3 +282,8 @@ class MergedCSVWriter:
         if not reader.fieldnames:
             raise MergedCSVError(f"{label} CSV is empty or has no header")
         return list(reader.fieldnames)
+
+    @staticmethod
+    def _require_timestamp_column(fields: Sequence[str], label: str) -> None:
+        if "timestamp_utc" not in fields:
+            raise MergedCSVError(f"{label} CSV is missing required column: timestamp_utc")

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
+import statistics
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +31,7 @@ class MergeResult:
     can_rows_before_nhr: int
     can_rows_after_nhr: int
     nhr_rows_merged: int
+    current_normalization: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -101,7 +104,7 @@ class MergedCSVWriter:
         try:
             with can_path.open("r", newline="", encoding="utf-8-sig") as can_handle:
                 with nhr_path.open("r", newline="", encoding="utf-8-sig") as nhr_handle:
-                    row_count = self._merge_handles(
+                    row_count, current_audit = self._merge_handles(
                         can_handle=can_handle,
                         nhr_handle=nhr_handle,
                         output_path=temporary,
@@ -130,6 +133,7 @@ class MergedCSVWriter:
             can_rows_before_nhr=can_rows_before,
             can_rows_after_nhr=can_rows_after,
             nhr_rows_merged=row_count,
+            current_normalization=current_audit,
         )
 
     def _merge_handles(
@@ -141,7 +145,7 @@ class MergedCSVWriter:
         signals: Sequence[str],
         overlap_start: float,
         overlap_end: float,
-    ) -> int:
+    ) -> tuple[int, Optional[dict]]:
         can_reader = csv.DictReader(can_handle)
         nhr_reader = csv.DictReader(nhr_handle)
         can_fields = self._require_header(can_reader, "CAN")
@@ -153,6 +157,9 @@ class MergedCSVWriter:
             raise MergedCSVError(
                 "CAN CSV is missing selected signal column(s): " + ", ".join(missing_signals)
             )
+        normalize_current = "batteryCurrent" in signals
+        if normalize_current and "current_a" not in nhr_fields:
+            raise MergedCSVError("NHR CSV is missing current_a for batteryCurrent normalization")
 
         output_fields = [f"nhr_{field}" for field in nhr_fields]
         for signal in signals:
@@ -163,6 +170,7 @@ class MergedCSVWriter:
         next_can = next(can_rows, None)
         signal_state: Dict[str, tuple[str, float]] = {}
         row_count = 0
+        current_windows: Dict[int, list[tuple[float, float]]] = {}
 
         with output_path.open("w", newline="", encoding="utf-8") as output_handle:
             writer = csv.DictWriter(output_handle, fieldnames=output_fields)
@@ -189,6 +197,23 @@ class MergedCSVWriter:
                     else:
                         value, signal_timestamp = state
                         age_s = nhr_timestamp - signal_timestamp
+                        if signal == "batteryCurrent":
+                            try:
+                                can_current = float(value)
+                            except ValueError as exc:
+                                raise MergedCSVError(f"Invalid CAN batteryCurrent: {value!r}") from exc
+                            if not math.isfinite(can_current):
+                                raise MergedCSVError("CAN batteryCurrent must be finite")
+                            value = str(-can_current)
+                            if age_s < self.stale_after_s:
+                                raw_nhr = nhr_row.get("current_a", "")
+                                try:
+                                    nhr_current = float(raw_nhr)
+                                except (TypeError, ValueError):
+                                    nhr_current = math.nan
+                                if math.isfinite(nhr_current):
+                                    window = int((nhr_timestamp - overlap_start) // 5)
+                                    current_windows.setdefault(window, []).append((can_current, nhr_current))
                         output_row[f"can_{signal}"] = value
                         output_row[f"can_{signal}_age_s"] = f"{age_s:.6f}"
                         output_row[f"can_{signal}_status"] = (
@@ -204,7 +229,41 @@ class MergedCSVWriter:
             raise MergedCSVError(
                 "CAN and NHR UTC ranges intersect but contain no NHR row in the overlap"
             )
-        return row_count
+        current_audit = None
+        if normalize_current:
+            comparable = []
+            for values in current_windows.values():
+                if len(values) < 3:
+                    continue
+                can_median = statistics.median(item[0] for item in values)
+                nhr_median = statistics.median(item[1] for item in values)
+                if abs(can_median) < 0.5 or abs(nhr_median) < 0.5:
+                    continue
+                comparable.append((can_median, nhr_median))
+            current_audit = {
+                "can_signal": "batteryCurrent", "nhr_field": "current_a",
+                "can_factor": -1, "reference_convention": "nhr",
+                "window_s": 5, "active_threshold_a": 0.5,
+                "relative_magnitude_tolerance": 0.2,
+                "comparable_windows": len(comparable),
+                "verification": "inconclusive",
+            }
+            if len(comparable) >= 3:
+                opposite_fraction = sum(c * n < 0 for c, n in comparable) / len(comparable)
+                median_relative_error = statistics.median(
+                    abs(abs(c) - abs(n)) / max(abs(n), 0.5) for c, n in comparable
+                )
+                current_audit.update(
+                    opposite_sign_fraction=opposite_fraction,
+                    median_relative_magnitude_error=median_relative_error,
+                )
+                if opposite_fraction < 0.8 or median_relative_error > 0.2:
+                    raise MergedCSVError(
+                        "CAN batteryCurrent and NHR current_a contradict the configured "
+                        "current normalization (5 s window plausibility check)"
+                    )
+                current_audit["verification"] = "plausible"
+        return row_count, current_audit
 
     def _time_profile(self, path: Path, label: str) -> _TimeProfile:
         with path.open("r", newline="", encoding="utf-8-sig") as handle:

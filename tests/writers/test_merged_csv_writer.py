@@ -186,3 +186,68 @@ def test_destination_cannot_overwrite_a_source(tmp_path):
             signals=["SignalA"],
         )
     assert can_path.read_bytes() == original
+
+
+def test_battery_current_uses_nhr_convention_with_delayed_can_samples(tmp_path):
+    can_path, nhr_path, output_path = (tmp_path / name for name in ("can.csv", "nhr.csv", "merged.csv"))
+    # CAN changes 1 s after NHR at each stage; 5 s medians still describe the same stage.
+    currents = [2.0, -3.0, 4.0, -2.0]
+    can_rows = [{"timestamp_utc": utc(99), "batteryCurrent": "-2"}]
+    nhr_rows = []
+    for stage, current in enumerate(currents):
+        start = 100 + stage * 5
+        if stage:
+            can_rows.append({"timestamp_utc": utc(start + 1), "batteryCurrent": str(-current)})
+        for second in range(5):
+            nhr_rows.append({"timestamp_utc": utc(start + second), "current_a": str(current)})
+    can_rows.append({"timestamp_utc": utc(119), "batteryCurrent": "2"})
+    write_csv(can_path, ["timestamp_utc", "batteryCurrent"], can_rows)
+    write_csv(nhr_path, ["timestamp_utc", "current_a"], nhr_rows)
+    original_can = can_path.read_bytes()
+    result = MergedCSVWriter().merge(
+        can_csv_path=str(can_path), nhr_csv_path=str(nhr_path),
+        output_path=str(output_path), signals=["batteryCurrent"],
+    )
+    rows = list(csv.DictReader(output_path.open(newline="", encoding="utf-8")))
+    assert rows[0]["can_batteryCurrent"] == "2.0"
+    assert rows[10]["can_batteryCurrent"] == "-3.0"  # one second of CAN latency
+    assert rows[11]["can_batteryCurrent"] == "4.0"
+    assert result.current_normalization["verification"] == "plausible"
+    assert result.current_normalization["can_factor"] == -1
+    assert can_path.read_bytes() == original_can
+
+
+def test_battery_current_contradiction_preserves_existing_output(tmp_path):
+    can_path, nhr_path, output_path = (tmp_path / name for name in ("can.csv", "nhr.csv", "merged.csv"))
+    write_csv(can_path, ["timestamp_utc", "batteryCurrent"], [
+        {"timestamp_utc": utc(second), "batteryCurrent": "2"}
+        for second in range(100, 121, 2)
+    ])
+    write_csv(nhr_path, ["timestamp_utc", "current_a"], [
+        {"timestamp_utc": utc(second), "current_a": "2"} for second in range(100, 121)
+    ])
+    output_path.write_text("prior result", encoding="utf-8")
+    with pytest.raises(MergedCSVError, match="contradict"):
+        MergedCSVWriter().merge(
+            can_csv_path=str(can_path), nhr_csv_path=str(nhr_path),
+            output_path=str(output_path), signals=["batteryCurrent"],
+        )
+    assert output_path.read_text(encoding="utf-8") == "prior result"
+
+
+def test_battery_current_rest_is_inconclusive_but_normalized(tmp_path):
+    can_path, nhr_path, output_path = (tmp_path / name for name in ("can.csv", "nhr.csv", "merged.csv"))
+    write_csv(can_path, ["timestamp_utc", "batteryCurrent"], [
+        {"timestamp_utc": utc(100), "batteryCurrent": "-0.1"},
+        {"timestamp_utc": utc(104), "batteryCurrent": "-0.1"},
+    ])
+    write_csv(nhr_path, ["timestamp_utc", "current_a"], [
+        {"timestamp_utc": utc(second), "current_a": "0.1"} for second in range(100, 105)
+    ])
+    result = MergedCSVWriter().merge(
+        can_csv_path=str(can_path), nhr_csv_path=str(nhr_path),
+        output_path=str(output_path), signals=["batteryCurrent"],
+    )
+    assert result.current_normalization["verification"] == "inconclusive"
+    rows = list(csv.DictReader(output_path.open(newline="", encoding="utf-8")))
+    assert float(rows[0]["can_batteryCurrent"]) == pytest.approx(0.1)

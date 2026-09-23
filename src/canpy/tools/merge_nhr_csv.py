@@ -220,6 +220,7 @@ def _write_report(invocation, evidence, result) -> Path:
         "can_rows_after_nhr": result.can_rows_after_nhr,
         "nhr_rows_merged": result.nhr_rows_merged,
         "can_stale_after_s": invocation["can_stale_after"],
+        "current_normalization": getattr(result, "current_normalization", None),
         "created_at_utc": utc_now_text(),
     }
     write_json_atomic(report_path, payload)
@@ -238,6 +239,10 @@ def print_merge_report(evidence, result, report_path=None, overrides=()) -> None
     print(f"  CAN rows before NHR: {result.can_rows_before_nhr}")
     print(f"  CAN rows after NHR: {result.can_rows_after_nhr}")
     print(f"  NHR rows merged: {result.nhr_rows_merged}")
+    normalization = getattr(result, "current_normalization", None)
+    if normalization:
+        print(f"  CAN current convention: NHR ({normalization['verification']}; "
+              f"{normalization['comparable_windows']} comparable 5 s windows)")
     print(f"  Explicit overrides: {', '.join(overrides) if overrides else 'none'}")
 
 

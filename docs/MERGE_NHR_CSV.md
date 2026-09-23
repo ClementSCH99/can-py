@@ -62,6 +62,22 @@ artifact, scope/stage, hashes/sizes, UTC windows, overlap, row counts, stale
 threshold and creation time. It never modifies or replaces either source
 manifest.
 
+## Current convention
+
+When `batteryCurrent` is selected (including via
+`signals/module_test_live_signals.txt`), `can_batteryCurrent` in the merged CSV
+uses the NHR convention: charge positive, discharge negative. It is the negated
+CAN source value. `nhr_current_a` remains the measured NHR value, and the source
+CSV files are unchanged. Other CAN current-like signals are not transformed.
+
+The merger checks plausibility using fresh CAN values and the median CAN/NHR
+currents in 5 s windows. Windows with fewer than three paired rows or either
+median below 0.5 A are excluded. At least three comparable windows are needed
+to verify the rule. Of those windows, at least 80% must have opposite raw signs,
+and the median relative magnitude difference must be at most 20%. A contradiction
+rejects the merge; insufficient active data is recorded as `inconclusive` in the
+report. The report also records the applied factor, field names and check values.
+
 ## Migration from the historical detailed command
 
 The old form remains available temporarily:

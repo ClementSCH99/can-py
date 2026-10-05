@@ -134,6 +134,8 @@ def test_merge_report_is_separate_and_complete(tmp_path):
         can_end_utc="2026-09-16T10:16:00Z", nhr_start_utc="2026-09-16T10:15:10Z",
         nhr_end_utc="2026-09-16T10:15:50Z", overlap_duration_s=40.0,
         can_rows_before_nhr=2, can_rows_after_nhr=3, nhr_rows_merged=41,
+        normalization={"schema_version": 1, "charge_sign": "positive",
+                       "signals": {"can_maxChargePower": {"output_unit": "W", "factor": -1000}}},
     )
     report_path = _write_report(invocation, evidence, result)
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -142,4 +144,5 @@ def test_merge_report_is_separate_and_complete(tmp_path):
     assert report["nhr_run_id"] == "run-1"
     assert report["nhr_artifact"]["role"] == "workflow_sequence"
     assert report["can_rows_after_nhr"] == 3
+    assert report["normalization"] == result.normalization
     assert manifest.read_bytes()

@@ -203,6 +203,8 @@ def test_ctrl_c_closes_can_before_resolving_already_finalized_run(tmp_path):
         run_id="run-123",
         workflow_state="passed",
         role="session_measurements",
+        size_bytes=42,
+        sha256="c" * 64,
     )
 
     def read_evidence(*args, **kwargs):
@@ -240,6 +242,7 @@ def test_ctrl_c_closes_can_before_resolving_already_finalized_run(tmp_path):
         can_rows_before_nhr=0,
         can_rows_after_nhr=0,
         nhr_rows_merged=2,
+        normalization={"schema_version": 1, "charge_sign": "positive"},
     )
 
     with (
@@ -254,6 +257,8 @@ def test_ctrl_c_closes_can_before_resolving_already_finalized_run(tmp_path):
     assert events == ["close_can", "resolve_nhr"]
     manifest = json.loads(Path(capture._manifest_path).read_text(encoding="utf-8"))
     assert manifest["closure_reason"] == "user_interrupt"
+    report = json.loads((tmp_path / "merged.report.json").read_text(encoding="utf-8"))
+    assert report["normalization"] == merge_result.normalization
 
 
 def test_ctrl_c_without_run_id_preserves_sources_and_prints_postprocess_command(

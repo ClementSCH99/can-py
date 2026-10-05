@@ -221,6 +221,7 @@ def _write_report(invocation, evidence, result) -> Path:
         "nhr_rows_merged": result.nhr_rows_merged,
         "can_stale_after_s": invocation["can_stale_after"],
         "current_normalization": getattr(result, "current_normalization", None),
+        "normalization": getattr(result, "normalization", None),
         "created_at_utc": utc_now_text(),
     }
     write_json_atomic(report_path, payload)

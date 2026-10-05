@@ -32,6 +32,7 @@ class MergeResult:
     can_rows_after_nhr: int
     nhr_rows_merged: int
     current_normalization: Optional[dict] = None
+    normalization: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ class MergedCSVWriter:
         try:
             with can_path.open("r", newline="", encoding="utf-8-sig") as can_handle:
                 with nhr_path.open("r", newline="", encoding="utf-8-sig") as nhr_handle:
-                    row_count, current_audit = self._merge_handles(
+                    row_count, current_audit, normalization = self._merge_handles(
                         can_handle=can_handle,
                         nhr_handle=nhr_handle,
                         output_path=temporary,
@@ -134,6 +135,7 @@ class MergedCSVWriter:
             can_rows_after_nhr=can_rows_after,
             nhr_rows_merged=row_count,
             current_normalization=current_audit,
+            normalization=normalization,
         )
 
     def _merge_handles(
@@ -145,7 +147,7 @@ class MergedCSVWriter:
         signals: Sequence[str],
         overlap_start: float,
         overlap_end: float,
-    ) -> tuple[int, Optional[dict]]:
+    ) -> tuple[int, Optional[dict], dict]:
         can_reader = csv.DictReader(can_handle)
         nhr_reader = csv.DictReader(nhr_handle)
         can_fields = self._require_header(can_reader, "CAN")
@@ -160,6 +162,38 @@ class MergedCSVWriter:
         normalize_current = "batteryCurrent" in signals
         if normalize_current and "current_a" not in nhr_fields:
             raise MergedCSVError("NHR CSV is missing current_a for batteryCurrent normalization")
+        setpoint_fields = [field for field in (
+            "setpoint_current_a", "setpoint_power_w", "setpoint_voltage_v"
+        ) if field in nhr_fields]
+        if setpoint_fields and "state" not in nhr_fields:
+            raise MergedCSVError("NHR CSV is missing state for setpoint normalization")
+        normalization = {
+            "schema_version": 1,
+            "reference_convention": "nhr",
+            "charge_sign": "positive", "discharge_sign": "negative",
+            "signals": {
+                f"can_{signal}": {
+                    "source_unit": "A" if signal == "batteryCurrent" else "kW",
+                    "output_unit": "A" if signal == "batteryCurrent" else "W",
+                    "factor": -1 if signal == "batteryCurrent" else -1000,
+                    "source_convention": "charge_negative_discharge_positive",
+                }
+                for signal in signals
+                if signal in {"batteryCurrent", "maxChargePower", "maxDischargePower"}
+            },
+            "setpoints": {
+                "fields": [f"nhr_{field}" for field in setpoint_fields],
+                "units": {f"nhr_{field}": field.rsplit("_", 1)[1].upper()
+                          for field in setpoint_fields},
+                "source_convention": "nonnegative_magnitude",
+                "state_factors": {"charge": 1, "discharge": -1},
+                "voltage_factor": 1,
+                "inactive_states": ["off", "standby"],
+                "inactive_value": "",
+                "blanked_rows": 0, "unsupported_states": {},
+                "state_reference": "recorded_state_may_be_cached",
+            },
+        }
 
         output_fields = [f"nhr_{field}" for field in nhr_fields]
         for signal in signals:
@@ -188,6 +222,25 @@ class MergedCSVWriter:
                 output_row = {
                     f"nhr_{field}": nhr_row.get(field, "") for field in nhr_fields
                 }
+                if setpoint_fields:
+                    operation = nhr_row.get("state", "").strip().lower()
+                    if operation not in {"charge", "discharge"}:
+                        for field in setpoint_fields:
+                            output_row[f"nhr_{field}"] = ""
+                        normalization["setpoints"]["blanked_rows"] += 1
+                        if operation not in {"off", "standby"}:
+                            unsupported = normalization["setpoints"]["unsupported_states"]
+                            unsupported[operation] = unsupported.get(operation, 0) + 1
+                    else:
+                        for field in setpoint_fields:
+                            raw = nhr_row.get(field, "")
+                            if raw is None or not raw.strip():
+                                continue
+                            magnitude = self._finite_number(raw, f"NHR {field}")
+                            if magnitude < 0:
+                                raise MergedCSVError(f"NHR {field} must be a nonnegative magnitude")
+                            factor = -1 if operation == "discharge" and field != "setpoint_voltage_v" else 1
+                            output_row[f"nhr_{field}"] = str(magnitude * factor if magnitude else 0.0)
                 for signal in signals:
                     state = signal_state.get(signal)
                     if state is None:
@@ -198,12 +251,7 @@ class MergedCSVWriter:
                         value, signal_timestamp = state
                         age_s = nhr_timestamp - signal_timestamp
                         if signal == "batteryCurrent":
-                            try:
-                                can_current = float(value)
-                            except ValueError as exc:
-                                raise MergedCSVError(f"Invalid CAN batteryCurrent: {value!r}") from exc
-                            if not math.isfinite(can_current):
-                                raise MergedCSVError("CAN batteryCurrent must be finite")
+                            can_current = self._finite_number(value, "CAN batteryCurrent")
                             value = str(-can_current)
                             if age_s < self.stale_after_s:
                                 raw_nhr = nhr_row.get("current_a", "")
@@ -214,6 +262,16 @@ class MergedCSVWriter:
                                 if math.isfinite(nhr_current):
                                     window = int((nhr_timestamp - overlap_start) // 5)
                                     current_windows.setdefault(window, []).append((can_current, nhr_current))
+                        elif signal in {"maxChargePower", "maxDischargePower"}:
+                            power = self._finite_number(value, f"CAN {signal}")
+                            if (signal == "maxChargePower" and power > 0) or (
+                                signal == "maxDischargePower" and power < 0
+                            ):
+                                raise MergedCSVError(f"CAN {signal} contradicts the configured BMS power sign")
+                            normalized_power = -1000 * power if power else 0.0
+                            if not math.isfinite(normalized_power):
+                                raise MergedCSVError(f"Normalized CAN {signal} must be finite")
+                            value = str(normalized_power)
                         output_row[f"can_{signal}"] = value
                         output_row[f"can_{signal}_age_s"] = f"{age_s:.6f}"
                         output_row[f"can_{signal}_status"] = (
@@ -263,7 +321,17 @@ class MergedCSVWriter:
                         "current normalization (5 s window plausibility check)"
                     )
                 current_audit["verification"] = "plausible"
-        return row_count, current_audit
+        return row_count, current_audit, normalization
+
+    @staticmethod
+    def _finite_number(value: str, label: str) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MergedCSVError(f"Invalid {label}: {value!r}") from exc
+        if not math.isfinite(number):
+            raise MergedCSVError(f"{label} must be finite")
+        return number
 
     def _time_profile(self, path: Path, label: str) -> _TimeProfile:
         with path.open("r", newline="", encoding="utf-8-sig") as handle:

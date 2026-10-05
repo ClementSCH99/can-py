@@ -1,0 +1,151 @@
+{
+  "source_hashes_unchanged": {
+    "C:\\Users\\Cl\u00e9mentSchaeffer\\OneDrive - Taiga Motors inc\\Bureau\\.Documents\\6 - Projects\\Cell_Testing\\Test_data\\202608_P32B_613_MOD020\\20261002_57_Charge_0-5C_25DegC.csv": "3387f96b4563df70c09992149ba453351b07174057a2cee85bb418736f965e8d",
+    "C:\\nhr-rt-runs\\ModuleTests\\can\\merged_capture_20261002_115451.csv": "233b4e2f477f7d97aebbb9df601f37520de825203efb1813f66c20498984ad55",
+    "C:\\nhr-rt-runs\\ModuleTests\\can\\can_capture_20261002_115451.csv": "19abe8ac6ea2c1537d6afed618e301672c5d2fc696befffdeeaab340c537fbe0",
+    "C:\\nhr-rt-runs\\ModuleTests\\workflow-runs\\434550a0-1ea1-4a67-a4df-2a5df339c021\\measurements\\sequence.csv": "f7b943715e190f0ff74bade4ebc7f20743d3fc7e616f06a3e27ad0a2b812486f"
+  },
+  "checks": [
+    {
+      "recording": "charge",
+      "rows_verified": 78226,
+      "source_mode": "reconstructed_from_legacy_merge",
+      "normalization": {
+        "schema_version": 1,
+        "reference_convention": "nhr",
+        "charge_sign": "positive",
+        "discharge_sign": "negative",
+        "signals": {
+          "can_batteryCurrent": {
+            "source_unit": "A",
+            "output_unit": "A",
+            "factor": -1,
+            "source_convention": "charge_negative_discharge_positive"
+          },
+          "can_maxChargePower": {
+            "source_unit": "kW",
+            "output_unit": "W",
+            "factor": -1000,
+            "source_convention": "charge_negative_discharge_positive"
+          },
+          "can_maxDischargePower": {
+            "source_unit": "kW",
+            "output_unit": "W",
+            "factor": -1000,
+            "source_convention": "charge_negative_discharge_positive"
+          }
+        },
+        "setpoints": {
+          "fields": [
+            "nhr_setpoint_current_a",
+            "nhr_setpoint_power_w",
+            "nhr_setpoint_voltage_v"
+          ],
+          "units": {
+            "nhr_setpoint_current_a": "A",
+            "nhr_setpoint_power_w": "W",
+            "nhr_setpoint_voltage_v": "V"
+          },
+          "source_convention": "nonnegative_magnitude",
+          "state_factors": {
+            "charge": 1,
+            "discharge": -1
+          },
+          "voltage_factor": 1,
+          "inactive_states": [
+            "off",
+            "standby"
+          ],
+          "inactive_value": "",
+          "blanked_rows": 670,
+          "unsupported_states": {},
+          "state_reference": "recorded_state_may_be_cached"
+        }
+      },
+      "current_audit": {
+        "can_signal": "batteryCurrent",
+        "nhr_field": "current_a",
+        "can_factor": -1,
+        "reference_convention": "nhr",
+        "window_s": 5,
+        "active_threshold_a": 0.5,
+        "relative_magnitude_tolerance": 0.2,
+        "comparable_windows": 1552,
+        "verification": "plausible",
+        "opposite_sign_fraction": 1.0,
+        "median_relative_magnitude_error": 0.004753733616441208
+      }
+    },
+    {
+      "recording": "discharge",
+      "rows_verified": 633,
+      "source_mode": "original_CAN_and_NHR",
+      "normalization": {
+        "schema_version": 1,
+        "reference_convention": "nhr",
+        "charge_sign": "positive",
+        "discharge_sign": "negative",
+        "signals": {
+          "can_batteryCurrent": {
+            "source_unit": "A",
+            "output_unit": "A",
+            "factor": -1,
+            "source_convention": "charge_negative_discharge_positive"
+          },
+          "can_maxChargePower": {
+            "source_unit": "kW",
+            "output_unit": "W",
+            "factor": -1000,
+            "source_convention": "charge_negative_discharge_positive"
+          },
+          "can_maxDischargePower": {
+            "source_unit": "kW",
+            "output_unit": "W",
+            "factor": -1000,
+            "source_convention": "charge_negative_discharge_positive"
+          }
+        },
+        "setpoints": {
+          "fields": [
+            "nhr_setpoint_current_a",
+            "nhr_setpoint_power_w",
+            "nhr_setpoint_voltage_v"
+          ],
+          "units": {
+            "nhr_setpoint_current_a": "A",
+            "nhr_setpoint_power_w": "W",
+            "nhr_setpoint_voltage_v": "V"
+          },
+          "source_convention": "nonnegative_magnitude",
+          "state_factors": {
+            "charge": 1,
+            "discharge": -1
+          },
+          "voltage_factor": 1,
+          "inactive_states": [
+            "off",
+            "standby"
+          ],
+          "inactive_value": "",
+          "blanked_rows": 364,
+          "unsupported_states": {},
+          "state_reference": "recorded_state_may_be_cached"
+        }
+      },
+      "current_audit": {
+        "can_signal": "batteryCurrent",
+        "nhr_field": "current_a",
+        "can_factor": -1,
+        "reference_convention": "nhr",
+        "window_s": 5,
+        "active_threshold_a": 0.5,
+        "relative_magnitude_tolerance": 0.2,
+        "comparable_windows": 5,
+        "verification": "plausible",
+        "opposite_sign_fraction": 1.0,
+        "median_relative_magnitude_error": 0.0032455250852705293
+      }
+    }
+  ],
+  "charge_limitation": "Original CAN timing/freshness cannot be verified from the supplied merged-only recording."
+}

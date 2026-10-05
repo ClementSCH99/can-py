@@ -159,6 +159,27 @@ Expected outputs are:
 - `merged_capture_<timestamp>.csv`: derived CAN/NHR analysis table;
 - `merged_capture_<timestamp>.report.json`: separate derived merge report.
 
+Merged electrical values use positive charge and negative discharge, current
+in A and power in W. `can_batteryCurrent` is multiplied by -1;
+`can_maxChargePower` and `can_maxDischargePower` are multiplied by -1000
+from signed BMS kW. Column names are retained: older merged power-limit columns
+were in BMS kW. Check `normalization.schema_version` (1 for this contract) and
+per-signal units/factors in the report before comparing old and new merges.
+Source CAN/NHR CSVs remain unchanged and can be merged again.
+
+NHR current/power setpoints are positive in `charge`, negative in `discharge`;
+voltage stays in V. All three setpoints are empty in `off`, `standby` or an
+unsupported state. Active zeros remain zero, and missing values remain empty.
+The report counts blanked rows and unsupported states. Setpoints retain their
+configured values during active states even when they act as ceilings rather
+than targets. State comes from the recorded NHR row and may reflect cached
+status rather than an exactly synchronized measurement.
+
+Non-finite/non-numeric converted values and incorrect BMS SoP signs are
+rejected without replacing an existing output. Negative NHR setpoint
+magnitudes in active states are rejected. Signal ages/freshness are unchanged;
+normalization does not make stale values usable as live limits.
+
 If the merge fails, source files remain unchanged, no partial merged CSV is
 retained and the capture command exits with failure. If the selected NHR run is
 still active or `finalizing`, CAN-PY waits without sending a stop request. If no

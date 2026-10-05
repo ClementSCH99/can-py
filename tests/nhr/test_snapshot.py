@@ -29,11 +29,15 @@ def test_poc_mapping_matches_selected_dbc_and_snapshot_names():
         "maxCellTemp": ("MaxCellTemp", "degC"),
         "minCellV": ("MinCellVolt", "V"),
         "maxCellV": ("MaxCellVolt", "V"),
+        "batteryCurrent": ("BatteryCurrent", "A"),
+        "batteryVoltage": ("BatteryVoltage", "V"),
+        "maxDischargePower": ("MaxDischargePower", "kW"),
+        "maxChargePower": ("MaxChargePower", "kW"),
     }
 
 
 def test_poc_mapping_signals_exist_in_reference_dbc():
-    dbc_file = Path(__file__).parents[2] / "dbc" / "6.44.4.0.dbc"
+    dbc_file = Path(__file__).parents[2] / "dbc" / "6.50.6.0_BMSM_module_test.dbc"
     parser = CANParser(str(dbc_file))
 
     assert ExternalSnapshotAssembler(
@@ -49,12 +53,20 @@ def test_assembler_waits_for_complete_multi_frame_snapshot():
     assert assembler.observe(
         frame(voltage_time, {"minCellV": 3.25, "maxCellV": 4.10})
     ) is None
-    snapshot = assembler.observe(
+    assert assembler.observe(
         frame(
             temperature_time,
             {"minCellTemp": 18.5, "maxCellTemp": 41.0},
         )
-    )
+    ) is None
+    assert assembler.observe(frame(
+        temperature_time + timedelta(milliseconds=10),
+        {"batteryCurrent": -32.0, "batteryVoltage": 90.0},
+    )) is None
+    snapshot = assembler.observe(frame(
+        temperature_time + timedelta(milliseconds=20),
+        {"maxDischargePower": 44.0, "maxChargePower": -20.0},
+    ))
 
     assert snapshot.timestamp_utc == voltage_time
     assert snapshot.signals == {
@@ -62,6 +74,10 @@ def test_assembler_waits_for_complete_multi_frame_snapshot():
         "MaxCellTemp": 41.0,
         "MinCellVolt": 3.25,
         "MaxCellVolt": 4.10,
+        "BatteryCurrent": -32.0,
+        "BatteryVoltage": 90.0,
+        "MaxDischargePower": 44.0,
+        "MaxChargePower": -20.0,
     }
 
 
@@ -71,6 +87,10 @@ def test_assembler_keeps_oldest_slow_signal_timestamp():
     assembler.observe(
         frame(initial_time, {"minCellTemp": 18.5, "maxCellTemp": 41.0})
     )
+    assembler.observe(frame(initial_time, {
+        "batteryCurrent": -32.0, "batteryVoltage": 90.0,
+        "maxDischargePower": 44.0, "maxChargePower": -20.0,
+    }))
     assembler.observe(
         frame(
             initial_time + timedelta(milliseconds=20),

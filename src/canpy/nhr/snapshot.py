@@ -30,6 +30,10 @@ BMS_POC_V2_MAPPING = (
     SignalMapping("maxCellTemp", "MaxCellTemp", "degC"),
     SignalMapping("minCellV", "MinCellVolt", "V"),
     SignalMapping("maxCellV", "MaxCellVolt", "V"),
+    SignalMapping("batteryCurrent", "BatteryCurrent", "A"),
+    SignalMapping("batteryVoltage", "BatteryVoltage", "V"),
+    SignalMapping("maxDischargePower", "MaxDischargePower", "kW"),
+    SignalMapping("maxChargePower", "MaxChargePower", "kW"),
 )
 
 

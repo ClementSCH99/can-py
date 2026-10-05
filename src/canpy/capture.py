@@ -544,7 +544,22 @@ class CANCapture:
             signals=sorted(self.merged_signals),
         )
         self._merged_csv_path = result.path
+        # Use the same report contract for automatic and explicit postprocessing.
+        from canpy.tools.merge_nhr_csv import _write_report
+
+        manifest_path = Path(self._manifest_path) if self._manifest_path else None
+        report_path = _write_report({
+            "manifest_path": manifest_path,
+            "manifest_sha256": sha256_file(manifest_path) if manifest_path else None,
+            "capture_id": can_path.stem,
+            "nhr_instrument": self.nhr_forwarder.instrument_id,
+            "nhr_scope": self.nhr_scope,
+            "nhr_stage_index": self.nhr_stage_index,
+            "signals": sorted(self.merged_signals),
+            "can_stale_after": self.merged_can_stale_after_s,
+        }, evidence, result)
         print(f"[OK] Merged CSV saved: {result.path}")
+        print(f"[OK] Merge report saved: {report_path}")
         print(f"  NHR run: {evidence.run_id} ({evidence.workflow_state})")
         print(f"  NHR artifact: {evidence.role} ({evidence.csv_path})")
         print(f"  CAN UTC: {result.can_start_utc} -> {result.can_end_utc}")
